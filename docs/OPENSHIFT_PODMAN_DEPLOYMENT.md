@@ -16,7 +16,7 @@ Browser ──HTTPS──> Route (ai-dashboard)
           (FastAPI / uvicorn)
                       │
                       ▼
-          OpenShift API, watsonx.ai, ICA
+          OpenShift API, watsonx.ai
 ```
 
 | Item | File |
@@ -35,7 +35,7 @@ Both images are already OpenShift-compatible (non-root, arbitrary UID, group 0 p
 - [Podman](https://podman.io/) installed. On Windows/macOS run `podman machine init` and `podman machine start` once.
 - [`oc` CLI](https://docs.redhat.com/en/documentation/openshift_container_platform/) installed.
 - Access to the cluster (API URL + login) and permission to create resources in a project.
-- Secrets/keys: watsonx API key + project ID, ICA API key, and an OpenShift API URL/token for the app to query clusters.
+- Secrets/keys: watsonx API key + project ID, and an OpenShift API URL/token for the app to query clusters.
 
 Verify:
 
@@ -128,8 +128,6 @@ oc create secret generic ai-dashboard-secrets `
   --from-literal=WATSONX_PROJECT_ID='<project-id>' `
   --from-literal=WATSONX_BASE_URL='https://eu-gb.ml.cloud.ibm.com' `
   --from-literal=WATSONX_MODEL='meta-llama/llama-3-3-70b-instruct' `
-  --from-literal=ICA_API_KEY='sk-<key>' `
-  --from-literal=ICA_MODEL='meta-llama/llama-4-maverick-17b-128e-instruct-fp8' `
   --dry-run=client -o yaml | oc apply -f -
 ```
 
@@ -212,7 +210,7 @@ This is what the GitHub Actions workflow [`.github/workflows/deploy-openshift.ym
 | Frontend pod `CrashLoopBackOff`, log `host not found in upstream "ai-dashboard-backend"` | nginx resolves the backend at startup. Make sure `Service/ai-dashboard-backend` exists in the same namespace (`oc get svc`) and restart the frontend. |
 | Backend pod not ready / `Error` | `oc logs deployment/ai-dashboard-backend`. Usually a missing secret: `oc get secret ai-dashboard-secrets`. |
 | `exec format error` | Image built for the wrong architecture. Rebuild with `--platform linux/amd64` (or `arm64` for ARM clusters). |
-| `502/504` on AI calls | Route and nginx timeouts are 180s. Check backend logs and that watsonx/ICA keys are valid. |
+| `502/504` on AI calls | Route and nginx timeouts are 180s. Check backend logs and that watsonx keys are valid. |
 | Permission denied writing files in container | Containers run with an arbitrary UID. Write only to `/tmp` or `/app` (group-0 writable), not to root-owned paths. |
 | Changed secret has no effect | `oc rollout restart deployment/ai-dashboard-backend`. |
 

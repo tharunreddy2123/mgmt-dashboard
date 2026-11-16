@@ -27,7 +27,7 @@ Architecture: an nginx **frontend** (serves the SPA and proxies `/api` and `/hea
 
 ### Read-only by design
 
-The application (and the watsonx.ai / ICA assistants) can only **read** the cluster: pods, logs, events, nodes, deployments, namespaces. There is no code path that creates, updates, deletes, scales, restarts or execs. Chat requests asking for such changes are refused before any model call, and `/api/action` only accepts `logs` and `describe`.
+The application (and the watsonx.ai assistant) can only **read** the cluster: pods, logs, events, nodes, deployments, namespaces. There is no code path that creates, updates, deletes, scales, restarts or execs. Chat requests asking for such changes are refused before any model call, and `/api/action` only accepts `logs` and `describe`.
 
 Defence in depth: give the app a token from a service account that only has the `view` role, so the cluster itself rejects writes even if the code were changed:
 
@@ -51,8 +51,6 @@ Add these under **Settings → Secrets and variables → Actions**:
 | `OPENSHIFT_NAMESPACE` | yes | Target project |
 | `WATSONX_API_KEY` | yes | watsonx.ai API key |
 | `WATSONX_PROJECT_ID` | yes | watsonx.ai project ID |
-| `ICA_API_KEY` | yes | ICA key (starts with `sk-`) |
-| `WATSONX_BASE_URL`, `WATSONX_MODEL`, `ICA_MODEL` | no | Override defaults |
 
 Pushing to `main` runs [`.github/workflows/deploy-openshift.yml`](.github/workflows/deploy-openshift.yml), which creates the `ai-dashboard-secrets` Secret, applies the manifests, builds both images on the cluster and rolls out. The app URL is printed at the end (`oc get route ai-dashboard`).
 
@@ -62,8 +60,7 @@ Pushing to `main` runs [`.github/workflows/deploy-openshift.yml`](.github/workfl
 oc project <namespace>
 oc create secret generic ai-dashboard-secrets \
   --from-literal=OPENSHIFT_API_URL=... --from-literal=OPENSHIFT_TOKEN=<read-only-token> \
-  --from-literal=WATSONX_API_KEY=... --from-literal=WATSONX_PROJECT_ID=... \
-  --from-literal=ICA_API_KEY=...
+  --from-literal=WATSONX_API_KEY=... --from-literal=WATSONX_PROJECT_ID=...
 oc apply -f openshift/app.yaml
 oc start-build ai-dashboard-backend  --from-dir=backend --follow
 oc start-build ai-dashboard-frontend --from-dir=. --follow

@@ -12,7 +12,6 @@ from config import settings
 from rca import is_rca_question, investigate, investigate_node
 from openshift_client import openshift_client
 from watsonx_client import watsonx_client
-from ica_client import ica_client
 
 app = FastAPI(title="OpenShift AI Assistant API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins_list,
@@ -300,73 +299,11 @@ async def root():
 @app.get("/health")
 async def health_check():
     wx_healthy  = await watsonx_client.check_health()
-    ica_healthy = await ica_client.check_health()
     return {
         "api": "healthy",
         "watsonx_ai": "healthy" if wx_healthy else "unavailable",
-        "ica": "healthy" if ica_healthy else ("unconfigured" if not settings.ica_api_key else "unavailable"),
         "model": settings.watsonx_model,
     }
-
-@app.post("/api/chat/ica", response_model=ChatResponse)
-async def chat_ica(request: ChatRequest):
-    """Chat endpoint that uses IBM Consulting Advantage (ICA) instead of watsonx.ai."""
-    if _is_write_request(request.message, generated=bool(request.incident)):
-        return ChatResponse(response=_READ_ONLY_REPLY)
-    if not settings.ica_api_key:
-        raise HTTPException(status_code=503, detail="ICA_API_KEY is not configured on the server.")
-    try:
-        intents = _detect_intents(request.message)
-        context_parts: List[str] = []
-        action_summary = None
-        action_success = None
-
-        rca_mode = bool(request.incident) or is_rca_question(request.message, intents)
-        parsed_action = _parse_action(request.message)
-        if rca_mode and parsed_action and parsed_action["action"] in ("logs", "describe"):
-            parsed_action = None  # the investigation already collects logs/status
-        if parsed_action:
-            summary, ok = await _execute_action(parsed_action)
-            action_summary = summary
-            action_success = ok
-            context_parts.append(
-                f"CLUSTER ACTION EXECUTED:\n"
-                f"  Action  : {parsed_action['action'].upper()} {parsed_action['kind']}\n"
-                f"  Target  : {parsed_action.get('name','?')} in {parsed_action.get('namespace','?')}\n"
-                f"  Result  : {'SUCCESS' if ok else 'FAILED'} - {summary}"
-            )
-            intents.update({"pods", "namespaces"})
-
-        if intents:
-            cluster_ctx = await _build_cluster_context(intents)
-            if cluster_ctx == "TOKEN_EXPIRED":
-                return ChatResponse(
-                    response="⚠️ **OpenShift token expired.** Use 'Connect to cluster' in the header to reconnect.",
-                    action_performed=None, action_success=None, context_used=None
-                )
-            if cluster_ctx:
-                context_parts.append(cluster_ctx)
-
-        if rca_mode:
-            rca_ctx = await _rca_evidence(request, intents)
-            if rca_ctx:
-                context_parts.insert(0, rca_ctx)
-
-        context = "\n\n".join(context_parts) if context_parts else None
-        history = None
-        if request.conversation_history:
-            history = [{"role": m.role, "content": m.content} for m in request.conversation_history]
-
-        response = await ica_client.answer_question(
-            question=request.message, context=context, conversation_history=history, rca=rca_mode)
-
-        return ChatResponse(response=response, action_performed=action_summary,
-                            action_success=action_success, context_used=context if context else None)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -569,7 +506,7 @@ async def test_watsonx():
     if not settings.watsonx_api_key:
         return {"status": "error", "message": "WATSONX_API_KEY is not set in backend/.env"}
     try:
-        reply = await ica_client.answer_question("Reply with exactly: watsonx connection OK")
+        reply = await watsonx_client.answer_question("Reply with exactly: watsonx connection OK")
         return {"status": "ok", "model": settings.watsonx_model,
                 "base_url": settings.watsonx_base_url, "reply": reply}
     except Exception as e:

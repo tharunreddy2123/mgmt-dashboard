@@ -106,13 +106,11 @@ const SUGGESTION_GROUPS = [
   { icon: AlertTriangle, label: 'Failed deployments',        query: 'Show failed or degraded deployments' },
 ];
 
-type AIProvider = 'watsonx' | 'ica';
 
 const WELCOME =
   'Hello! I\'m your OpenShift AI assistant.\n\nI am connected to your live cluster and can:\n\n• Show pods, nodes, deployments, events and namespaces\n• Diagnose CrashLoopBackOff, OOMKilled, Pending pods\n• Analyze cluster health with AI insights\n• Explain warning events and suggest fixes\n• Answer any OpenShift / Kubernetes question\n\nPick a quick action below or type your question.';
 
 export default function AIChat({ isOpen, onClose, initialMessage, incident }: AIChatProps) {
-  const [provider, setProvider] = useState<AIProvider>('watsonx');
   const [messages, setMessages] = useState<Message[]>([
     { role: 'assistant', content: WELCOME, timestamp: new Date() },
   ]);
@@ -171,9 +169,7 @@ export default function AIChat({ isOpen, onClose, initialMessage, incident }: AI
         content: m.content,
       }));
 
-      // Route to the correct backend endpoint based on selected provider
-      const endpoint = provider === 'ica' ? '/api/chat/ica' : '/api/chat';
-      const response = await fetchWithRetry(`${BACKEND_URL}${endpoint}`, {
+      const response = await fetchWithRetry(`${BACKEND_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -232,34 +228,11 @@ export default function AIChat({ isOpen, onClose, initialMessage, incident }: AI
                 OpenShift AI Assistant
               </h2>
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                {provider === 'ica' ? 'Powered by ICA' : 'Powered by IBM watsonx.ai'}
+                Powered by IBM watsonx.ai
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {/* AI Provider toggle */}
-            <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-              <button
-                onClick={() => setProvider('watsonx')}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                  provider === 'watsonx'
-                    ? 'bg-white dark:bg-gray-600 text-blue-600 dark:text-blue-400 shadow-sm'
-                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                }`}
-              >
-                watsonx
-              </button>
-              <button
-                onClick={() => setProvider('ica')}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                  provider === 'ica'
-                    ? 'bg-white dark:bg-gray-600 text-purple-600 dark:text-purple-400 shadow-sm'
-                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-                }`}
-              >
-                ICA
-              </button>
-            </div>
             <button
               onClick={onClose}
               className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"

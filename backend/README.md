@@ -1,6 +1,6 @@
 # OpenShift AI Assistant — Backend
 
-FastAPI service that talks to the OpenShift API and IBM watsonx.ai / ICA.
+FastAPI service that talks to the OpenShift API and IBM watsonx.ai.
 
 ## Run locally
 
@@ -22,7 +22,6 @@ Health check: http://localhost:8000/health
 | `OPENSHIFT_TOKEN` | Token (`sha256~…`) used to query the cluster |
 | `WATSONX_API_KEY`, `WATSONX_PROJECT_ID` | IBM watsonx.ai credentials |
 | `WATSONX_BASE_URL`, `WATSONX_MODEL` | watsonx.ai endpoint / model (have defaults) |
-| `ICA_API_KEY`, `ICA_MODEL` | IBM Consulting Advantage |
 | `CORS_ORIGINS` | Comma-separated allowed origins |
 
 On OpenShift these come from the `ai-dashboard-secrets` Secret (see the root README).

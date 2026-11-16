@@ -7,8 +7,8 @@ on:
 
 # Required GitHub repository secrets:
 #   OPENSHIFT_SERVER, OPENSHIFT_TOKEN, OPENSHIFT_NAMESPACE   (deployment target)
-#   APP_OPENSHIFT_TOKEN, WATSONX_API_KEY, WATSONX_PROJECT_ID, ICA_API_KEY   (app config)
-# Optional: WATSONX_BASE_URL, WATSONX_MODEL, ICA_MODEL
+#   APP_OPENSHIFT_TOKEN, WATSONX_API_KEY, WATSONX_PROJECT_ID   (app config)
+# Optional: WATSONX_BASE_URL, WATSONX_MODEL
 # APP_OPENSHIFT_TOKEN: token of a READ-ONLY service account (ClusterRole `view`) used by the running app.
 #   Do NOT reuse the deployer token - the app must never hold write access.
 
@@ -40,8 +40,6 @@ jobs:
             --from-literal=WATSONX_PROJECT_ID='${{ secrets.WATSONX_PROJECT_ID }}' \
             --from-literal=WATSONX_BASE_URL='${{ secrets.WATSONX_BASE_URL || 'https://eu-gb.ml.cloud.ibm.com' }}' \
             --from-literal=WATSONX_MODEL='${{ secrets.WATSONX_MODEL || 'meta-llama/llama-3-3-70b-instruct' }}' \
-            --from-literal=ICA_API_KEY='${{ secrets.ICA_API_KEY }}' \
-            --from-literal=ICA_MODEL='${{ secrets.ICA_MODEL || 'meta-llama/llama-4-maverick-17b-128e-instruct-fp8' }}' \
             --dry-run=client -o yaml | oc apply -f -
 
       - name: Apply manifests
