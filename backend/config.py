@@ -5,7 +5,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
     # OpenShift Configuration
+<<<<<<< HEAD
     # Leave both empty when deployed inside OpenShift: the pod's service account is used automatically.
+=======
+>>>>>>> 1801054 (Add test file)
     openshift_api_url: str = ""
     openshift_token: str = ""
     # Comma-separated namespaces to show when the service account can't list projects
@@ -21,9 +24,6 @@ class Settings(BaseSettings):
     # IBM Consulting Advantage (ICA) Configuration
     ica_api_key: str = ""
     ica_model: str = "meta-llama/llama-4-maverick-17b-128e-instruct-fp8"
-
-    # ChromaDB Configuration
-    chroma_persist_dir: str = "./chroma_db"
 
     # API Configuration
     api_host: str = "0.0.0.0"

@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-dashboard-frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      app: ai-dashboard-frontend
+  template:
+    metadata:
+      labels:
+        app: ai-dashboard-frontend
+    spec:
+      imagePullSecrets:
+        - name: {{ .Values.pullSecret }}
+      containers:
+        - name: frontend
+          image: {{ .Values.image.registry }}/ai-dashboard-frontend:{{ .Values.image.tag }}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+          resources:
+{{ toYaml .Values.frontend.resources | indent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-dashboard-frontend
+spec:
+  selector:
+    app: ai-dashboard-frontend
+  ports:
+    - port: 8080
+      targetPort: 8080

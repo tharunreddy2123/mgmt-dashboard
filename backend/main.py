@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Tuple
 import re
@@ -8,30 +9,30 @@ import httpx
 import uvicorn
 
 from config import settings
+from rca import is_rca_question, investigate, investigate_node
 from openshift_client import openshift_client
 from watsonx_client import watsonx_client
 from ica_client import ica_client
 
-try:
-    from rag_system import rag_system
-    RAG_AVAILABLE = True
-except (ImportError, RuntimeError) as e:
-    print(f"Warning: RAG system unavailable ({type(e).__name__}).")
-    RAG_AVAILABLE = False
-    rag_system = None
-
 app = FastAPI(title="OpenShift AI Assistant API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins_list,
-                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+                   allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 class ChatMessage(BaseModel):
     role: str
     content: str
 
+class IncidentRef(BaseModel):
+    kind: str                      # "Pod" or "Node"
+    name: str
+    namespace: Optional[str] = None
+
 class ChatRequest(BaseModel):
     message: str
     conversation_history: Optional[List[ChatMessage]] = None
     include_context: bool = True
+    incident: Optional[IncidentRef] = None   # set when the chat is opened from an Incidents card
 
 class ChatResponse(BaseModel):
     response: str
@@ -47,38 +48,73 @@ class ClusterHealthResponse(BaseModel):
     health_data: Dict[str, Any]
     ai_analysis: str
 
-class AddRunbookRequest(BaseModel):
-    title: str
-    content: str
-    category: str
-    tags: Optional[List[str]] = None
-
 class ActionRequest(BaseModel):
     action: str
     kind: str
     name: Optional[str] = None
     namespace: Optional[str] = None
-    replicas: Optional[int] = None
-    manifest: Optional[Dict[str, Any]] = None
     container: Optional[str] = None
     tail_lines: Optional[int] = 0
 
 _DEFAULT_NAMESPACE = "tharunreddy-dev"
 
-_IMAGE_MAP: Dict[str, str] = {
-    "nginx": "nginxinc/nginx-unprivileged:latest",
-    "httpd": "httpd:alpine",
-    "redis": "redis:7-alpine",
-    "mysql": "mysql:8",
-    "postgres": "postgres:15-alpine",
-    "python": "python:3.11-slim",
-    "node": "node:20-alpine",
-    "busybox": "busybox:latest",
-    "alpine": "alpine:3.19",
-    "ubuntu": "ubuntu:22.04",
-    "golang": "golang:1.22-alpine",
-    "java": "eclipse-temurin:21-jre-alpine",
-}
+# ──────────────────────────────────────────────────────────────────────────────
+# READ-ONLY ENFORCEMENT
+# This application NEVER issues any write, patch, delete, exec, or scale
+# operation against the cluster. Every request that reaches the OpenShift API
+# is a plain HTTP GET. The guards below are defence-in-depth for the LLM layer.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Only these two actions (both are GET-only) are ever allowed.
+_READ_ONLY_ACTIONS: frozenset = frozenset({"logs", "describe"})
+
+_READ_ONLY_REPLY = (
+    "🔒 **This assistant is read-only.**\n\n"
+    "I can view pods, logs, events, nodes, deployments and namespaces, "
+    "and I can explain issues and recommend fix commands — "
+    "but I **cannot** create, delete, scale, restart, patch, exec into, "
+    "or modify anything in the cluster.\n\n"
+    "To apply a change, run the suggested `oc` command yourself with an "
+    "account that has write access."
+)
+
+# Requests that try to change the cluster — checked BEFORE any LLM call.
+# Verbs: every kubectl/oc mutating verb.
+# Resources: extended to cover all common Kubernetes/OpenShift resource types.
+_WRITE_REQUEST = re.compile(
+    r"\b("
+    r"create|make|spin.?up|launch|new|add|"
+    r"delete|remove|destroy|kill|terminate|"
+    r"scale|resize|set\s+replicas?|"
+    r"restart|reboot|bounce|rollout\s+restart|redeploy|"
+    r"patch|edit|update|apply|replace|"
+    r"rollback|undo|"
+    r"exec|rsh|run\s+in|attach|"
+    r"evict|drain|cordon|uncordon|taint|"
+    r"expose|port.?forward|cp\s|copy\s"
+    r")\b"
+    r".{0,80}"
+    r"\b("
+    r"pod|pods|container|containers|"
+    r"deployment|deployments|statefulset|daemonset|replicaset|"
+    r"service|svc|route|ingress|"
+    r"configmap|cm|secret|"
+    r"namespace|project|ns|"
+    r"node|nodes|"
+    r"replica|replicas|"
+    r"job|cronjob|cron.?job|"
+    r"pvc|persistentvolumeclaim|persistentvolume|pv|"
+    r"serviceaccount|sa|role|rolebinding|clusterrole|"
+    r"nginx|httpd|redis|mysql|postgres|python|busybox|alpine|ubuntu"
+    r")\b",
+    re.I,
+)
+
+def _is_write_request(message: str, generated: bool = False) -> bool:
+    # generated=True: message was built by the UI from cluster data (Incidents -> AI chat); event text such as
+    # 'Failed to create pod sandbox' would otherwise trip the keyword filter. Real enforcement is the GET-only
+    # transport in openshift_client.py, this filter is just a UX guard.
+    return (not generated) and bool(_WRITE_REQUEST.search(message))
 
 _INTENT_PATTERNS = {
     "pods":        r"\b(pod|pods|container|crashloop|oom|evicted|terminating|pending|running|failed|restart)\b",
@@ -90,9 +126,6 @@ _INTENT_PATTERNS = {
     "health":      r"\b(health|healthy|unhealthy|cluster.?health|status|overview|summary)\b",
     "list":        r"\b(list|show|get|display|all)\b",
     "services":    r"\b(service|services|svc|endpoint|port)\b",
-    "create":      r"\b(create|make|add|deploy|spin.?up|launch|start|run)\b",
-    "delete":      r"\b(delete|remove|destroy|kill|clean.?up)\b",
-    "scale":       r"\b(scale|replicas|replica.?count|resize)\b",
     "describe":    r"\b(describe|inspect|detail|info|check)\b",
 }
 
@@ -108,32 +141,8 @@ def _ns_from(text: str) -> str:
     return m.group(1) if m else _DEFAULT_NAMESPACE
 
 def _parse_action(msg: str) -> Optional[Dict[str, Any]]:
+    """Map a chat message to a READ-ONLY action (describe / logs). Never returns a write action."""
     t = msg.strip()
-
-    m = re.search(r"\b(create|make|run|deploy|launch|start|add)\b.{0,50}\b(nginx|httpd|redis|mysql|postgres|python|node|busybox|alpine|ubuntu|golang|java)\b", t, re.I)
-    if m:
-        ik = m.group(2).lower()
-        ns = _ns_from(t)
-        return {"action": "create", "kind": "Pod", "name": f"{ik}-pod", "namespace": ns,
-                "manifest": {"apiVersion": "v1", "kind": "Pod",
-                             "metadata": {"name": f"{ik}-pod", "namespace": ns, "labels": {"app": ik, "created-by": "ai-assistant"}},
-                             "spec": {"containers": [{"name": ik, "image": _IMAGE_MAP.get(ik, f"{ik}:latest"), "ports": [{"containerPort": 8080 if ik == "nginx" else 80}]}]}}}
-
-    m = re.search(r"\b(delete|remove|destroy|kill)\b.{0,30}\bpod\b.{0,30}\b([\w-]+)\b", t, re.I)
-    if m:
-        return {"action": "delete", "kind": "Pod", "name": m.group(2), "namespace": _ns_from(t)}
-
-    m = re.search(r"\b(delete|remove|destroy)\b.{0,30}\bdeployment\b.{0,30}\b([\w-]+)\b", t, re.I)
-    if m:
-        return {"action": "delete", "kind": "Deployment", "name": m.group(2), "namespace": _ns_from(t)}
-
-    m = re.search(r"\bscale\b.{0,50}\b([\w-]+)\b.{0,30}\b(\d+)\b", t, re.I)
-    if m and m.group(1).lower() not in ("deployment", "the", "a", "to"):
-        return {"action": "scale", "kind": "Deployment", "name": m.group(1), "namespace": _ns_from(t), "replicas": int(m.group(2))}
-
-    m = re.search(r"\brestart\b.{0,40}\b(?:deployment\s+)?([\w-]+)\b", t, re.I)
-    if m and m.group(1).lower() not in ("the", "a", "an", "my", "pod", "deployment", "all", "cluster"):
-        return {"action": "restart", "kind": "Deployment", "name": m.group(1), "namespace": _ns_from(t)}
 
     m = re.search(r"\b(describe|inspect|detail|info)\b.{0,30}\bpod\b.{0,30}\b([\w-]+)\b", t, re.I)
     if m:
@@ -152,30 +161,10 @@ async def _execute_action(act: Dict[str, Any]) -> Tuple[str, bool]:
     name      = act.get("name", "")
     ns        = act.get("namespace", _DEFAULT_NAMESPACE)
     container = act.get("container")
+    if action not in _READ_ONLY_ACTIONS:
+        return ("Action not permitted: this application is read-only.", False)
     try:
-        if action == "create":
-            r = await openshift_client.create_resource(ns, act["manifest"])
-            if r.get("success"):
-                rname = r.get("resource", {}).get("metadata", {}).get("name", name)
-                return (f"Created {kind} `{rname}` in namespace `{ns}`.", True)
-            return (f"Failed to create {kind} `{name}`: {r.get('error','unknown')}", False)
-        elif action == "delete":
-            r = await openshift_client.delete_resource(ns, kind, name)
-            if r.get("success"):
-                return (f"Deleted {kind} `{name}` from `{ns}`.", True)
-            return (f"Failed to delete {kind} `{name}`: {r.get('error','unknown')}", False)
-        elif action == "scale":
-            replicas = act.get("replicas", 1)
-            r = await openshift_client.scale_deployment(ns, name, replicas)
-            if r.get("success"):
-                return (f"Scaled Deployment `{name}` to {replicas} replica(s) in `{ns}`.", True)
-            return (f"Failed to scale `{name}`: {r.get('error','unknown')}", False)
-        elif action == "restart":
-            r = await openshift_client.restart_deployment(ns, name)
-            if r.get("success"):
-                return (f"Triggered rollout restart for Deployment `{name}` in `{ns}`.", True)
-            return (f"Failed to restart `{name}`: {r.get('error','unknown')}", False)
-        elif action == "describe":
+        if action == "describe":
             result = await openshift_client.describe_pod(ns, name)
             return (result, True)
         elif action == "logs":
@@ -223,7 +212,7 @@ async def _build_cluster_context(intents: set) -> str:
             sections.append(f"ACCESSIBLE NAMESPACES ({len(names)}): {', '.join(names) if names else 'none'}")
         except Exception as ex:
             sections.append(f"NAMESPACES: error - {ex}")
-    if intents & {"pods","health","logs","list","create","delete","describe"}:
+    if intents & {"pods","health","logs","list","describe"}:
         try:
             pods = await openshift_client.get_pods()
             running = sum(1 for p in pods if p.get("status",{}).get("phase") == "Running")
@@ -281,6 +270,29 @@ async def _build_cluster_context(intents: set) -> str:
             sections.append(f"EVENTS: error - {ex}")
     return "\n\n".join(sections)
 
+async def _rca_evidence(request: "ChatRequest", intents: set) -> Optional[str]:
+    """For root-cause style questions, collect live evidence (status, events, logs,
+    node, dependency pods) so the LLM can answer with proof instead of guessing."""
+    inc = request.incident
+    if not inc and not is_rca_question(request.message, intents):
+        return None
+    history_text = " ".join(m.content for m in (request.conversation_history or [])[-6:] if m.role == "user")
+    try:
+        if inc and inc.kind == "Node":
+            evidence = await investigate_node(inc.name)
+        elif inc and inc.kind == "Pod" and inc.namespace:
+            evidence = await investigate(request.message, history_text, force=(inc.namespace, inc.name))
+            if not evidence:
+                return (f"INVESTIGATION: pod {inc.namespace}/{inc.name} no longer exists or is not accessible "
+                        "(it may have been replaced after a restart or rollout).")
+        else:
+            evidence = await investigate(request.message, history_text)
+    except Exception as ex:
+        return f"INVESTIGATION ERROR: could not collect evidence ({ex})"
+    if not evidence:
+        return "INVESTIGATION: no unhealthy or matching pods were found in the accessible namespaces."
+    return "INVESTIGATION EVIDENCE (collected live from the cluster):\n" + evidence
+
 @app.get("/")
 async def root():
     return {"service": "OpenShift AI Assistant API", "status": "running", "version": "3.0.0"}
@@ -289,20 +301,18 @@ async def root():
 async def health_check():
     wx_healthy  = await watsonx_client.check_health()
     ica_healthy = await ica_client.check_health()
-    rag_status  = "healthy" if RAG_AVAILABLE else "unavailable"
-    rag_docs    = rag_system.get_stats()["total_documents"] if RAG_AVAILABLE else 0
     return {
         "api": "healthy",
         "watsonx_ai": "healthy" if wx_healthy else "unavailable",
         "ica": "healthy" if ica_healthy else ("unconfigured" if not settings.ica_api_key else "unavailable"),
         "model": settings.watsonx_model,
-        "rag_system": rag_status,
-        "knowledge_base_docs": rag_docs,
     }
 
 @app.post("/api/chat/ica", response_model=ChatResponse)
 async def chat_ica(request: ChatRequest):
     """Chat endpoint that uses IBM Consulting Advantage (ICA) instead of watsonx.ai."""
+    if _is_write_request(request.message, generated=bool(request.incident)):
+        return ChatResponse(response=_READ_ONLY_REPLY)
     if not settings.ica_api_key:
         raise HTTPException(status_code=503, detail="ICA_API_KEY is not configured on the server.")
     try:
@@ -311,7 +321,10 @@ async def chat_ica(request: ChatRequest):
         action_summary = None
         action_success = None
 
+        rca_mode = bool(request.incident) or is_rca_question(request.message, intents)
         parsed_action = _parse_action(request.message)
+        if rca_mode and parsed_action and parsed_action["action"] in ("logs", "describe"):
+            parsed_action = None  # the investigation already collects logs/status
         if parsed_action:
             summary, ok = await _execute_action(parsed_action)
             action_summary = summary
@@ -324,20 +337,20 @@ async def chat_ica(request: ChatRequest):
             )
             intents.update({"pods", "namespaces"})
 
-        if request.include_context and RAG_AVAILABLE and intents:
-            rag_ctx = rag_system.get_relevant_context(request.message, max_results=2)
-            if rag_ctx:
-                context_parts.append(f"RUNBOOK CONTEXT:\n{rag_ctx}")
-
         if intents:
             cluster_ctx = await _build_cluster_context(intents)
             if cluster_ctx == "TOKEN_EXPIRED":
                 return ChatResponse(
-                    response="⚠️ **OpenShift token expired.** Update it via the Token button in the header.",
+                    response="⚠️ **OpenShift token expired.** Use 'Connect to cluster' in the header to reconnect.",
                     action_performed=None, action_success=None, context_used=None
                 )
             if cluster_ctx:
                 context_parts.append(cluster_ctx)
+
+        if rca_mode:
+            rca_ctx = await _rca_evidence(request, intents)
+            if rca_ctx:
+                context_parts.insert(0, rca_ctx)
 
         context = "\n\n".join(context_parts) if context_parts else None
         history = None
@@ -345,7 +358,7 @@ async def chat_ica(request: ChatRequest):
             history = [{"role": m.role, "content": m.content} for m in request.conversation_history]
 
         response = await ica_client.answer_question(
-            question=request.message, context=context, conversation_history=history)
+            question=request.message, context=context, conversation_history=history, rca=rca_mode)
 
         return ChatResponse(response=response, action_performed=action_summary,
                             action_success=action_success, context_used=context if context else None)
@@ -357,13 +370,18 @@ async def chat_ica(request: ChatRequest):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    if _is_write_request(request.message, generated=bool(request.incident)):
+        return ChatResponse(response=_READ_ONLY_REPLY)
     try:
         intents = _detect_intents(request.message)
         context_parts: List[str] = []
         action_summary = None
         action_success = None
 
+        rca_mode = bool(request.incident) or is_rca_question(request.message, intents)
         parsed_action = _parse_action(request.message)
+        if rca_mode and parsed_action and parsed_action["action"] in ("logs", "describe"):
+            parsed_action = None  # the investigation already collects logs/status
         if parsed_action:
             summary, ok = await _execute_action(parsed_action)
             action_summary = summary
@@ -376,29 +394,25 @@ async def chat(request: ChatRequest):
             )
             intents.update({"pods", "namespaces"})
 
-        if request.include_context and RAG_AVAILABLE and intents:
-            rag_ctx = rag_system.get_relevant_context(request.message, max_results=2)
-            if rag_ctx:
-                context_parts.append(f"RUNBOOK CONTEXT:\n{rag_ctx}")
-
         if intents:
             cluster_ctx = await _build_cluster_context(intents)
             if cluster_ctx == "TOKEN_EXPIRED":
                 return ChatResponse(
                     response=(
-                        "⚠️ **OpenShift token expired.**\n\n"
-                        "Your cluster token is no longer valid. To fix:\n\n"
-                        "1. Go to the [OpenShift console](https://console.apps.rm3.7wse.p1.openshiftapps.com)\n"
-                        "2. Click your username → **Copy login command** → **Display Token**\n"
-                        "3. Copy the `sha256~...` token\n"
-                        "4. Open `backend/.env` and update:\n"
-                        "   `OPENSHIFT_TOKEN=sha256~<your-new-token>`\n"
-                        "5. Restart the backend: `.\\start-backend.ps1`"
+                        "⚠️ **Cluster connection lost.**\n\n"
+                        "The cluster rejected the current token. Click **Connect to cluster** in the dashboard header "
+                        "and enter the cluster API URL and a valid token "
+                        "(or update the `OPENSHIFT_TOKEN` secret and restart the backend)."
                     ),
                     action_performed=None, action_success=None, context_used=None
                 )
             if cluster_ctx:
                 context_parts.append(cluster_ctx)
+
+        if rca_mode:
+            rca_ctx = await _rca_evidence(request, intents)
+            if rca_ctx:
+                context_parts.insert(0, rca_ctx)
 
         context = "\n\n".join(context_parts) if context_parts else None
         history = None
@@ -406,7 +420,7 @@ async def chat(request: ChatRequest):
             history = [{"role": m.role, "content": m.content} for m in request.conversation_history]
 
         response = await watsonx_client.answer_question(
-            question=request.message, context=context, conversation_history=history)
+            question=request.message, context=context, conversation_history=history, rca=rca_mode)
 
         return ChatResponse(response=response, action_performed=action_summary,
                             action_success=action_success, context_used=context if context else None)
@@ -415,6 +429,8 @@ async def chat(request: ChatRequest):
 
 @app.post("/api/chat/quick")
 async def quick_chat(request: ChatRequest):
+    if _is_write_request(request.message):
+        return {"response": _READ_ONLY_REPLY}
     try:
         response = await watsonx_client.answer_question(question=request.message)
         return {"response": response}
@@ -423,11 +439,13 @@ async def quick_chat(request: ChatRequest):
 
 @app.post("/api/action")
 async def execute_action_direct(request: ActionRequest):
+    """Read-only actions only (logs, describe). Anything else is rejected."""
+    if request.action not in _READ_ONLY_ACTIONS:
+        raise HTTPException(status_code=403, detail="This application is read-only.")
     try:
         act = {"action": request.action, "kind": request.kind, "name": request.name or "",
-               "namespace": request.namespace or _DEFAULT_NAMESPACE, "manifest": request.manifest,
-               "replicas": request.replicas, "container": request.container,
-               "tail_lines": request.tail_lines}
+               "namespace": request.namespace or _DEFAULT_NAMESPACE,
+               "container": request.container, "tail_lines": request.tail_lines}
         summary, ok = await _execute_action(act)
         return {"result": summary, "success": ok}
     except Exception as e:
@@ -461,77 +479,17 @@ async def get_deployments(namespace: Optional[str] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-class ScaleRequest(BaseModel):
-    name: str        # controller name (e.g. "nginx", "nginx2")
-    namespace: str
-    replicas: int    # absolute target replica count
-
-
-@app.post("/api/openshift/scale")
-async def scale_workload(request: ScaleRequest):
-    """Scale a workload to an exact replica count.
-
-    Equivalent to:  oc scale deployment <name> --replicas=<n> -n <namespace>
-
-    Tries deployment → deploymentconfig → replicationcontroller automatically.
-    Falls back to direct API patching when the oc binary is not available.
-    """
-    if request.replicas < 0:
-        raise HTTPException(status_code=400, detail="replicas must be >= 0")
-
-    result = await openshift_client.oc_scale(request.namespace, request.name, request.replicas)
-
-    if not result.get("success"):
-        err = result.get("error", "Scale failed")
-        status_code = 403 if "403" in str(err) else 404 if "not found" in err.lower() else 500
-        raise HTTPException(status_code=status_code, detail=err)
-
-    return {
-        "success": True,
-        "name": request.name,
-        "namespace": request.namespace,
-        "replicas": request.replicas,
-        "message": result.get("message", f"Scaled to {request.replicas} replica(s)"),
-        "resource_type": result.get("resource_type", "deployment"),
-    }
-
-@app.get("/api/openshift/pod-owner")
-async def get_pod_owner(pod_name: str, namespace: str):
-    """Return the owner references of a pod so the frontend can determine the correct controller."""
-    data = await openshift_client._api_request(
-        f"/api/v1/namespaces/{namespace}/pods/{pod_name}"
-    )
-    err = data.get("error", "")
-    if "403" in str(err):
-        raise HTTPException(status_code=403, detail=f"No pod read access in namespace '{namespace}'")
-    if err or not data.get("metadata"):
-        raise HTTPException(status_code=404, detail=f"Pod '{pod_name}' not found in namespace '{namespace}'")
-    owners = data.get("metadata", {}).get("ownerReferences", [])
-    return {"pod": pod_name, "namespace": namespace, "ownerReferences": owners}
-
-@app.get("/api/openshift/deployment-replicas")
-async def get_deployment_replicas(name: str, namespace: str):
-    """Return the current replica count for a deployment.
-    Returns HTTP 403 when the token lacks permission (used by the frontend permission probe).
-    Returns HTTP 404 when the deployment simply does not exist.
-    """
-    data = await openshift_client._api_request(
-        f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
-    )
-    err = data.get("error", "")
-    if "403" in str(err):
-        raise HTTPException(status_code=403, detail=f"No deployment read access in namespace '{namespace}'")
-    if err:
-        # Any other error (404, connection, etc.) — treat as "namespace is accessible but deployment missing"
-        raise HTTPException(status_code=404, detail=str(err))
-    replicas = data.get("spec", {}).get("replicas", 0)
-    ready    = data.get("status", {}).get("readyReplicas", 0)
-    return {"name": name, "namespace": namespace, "replicas": replicas, "ready_replicas": ready}
-
 @app.get("/api/openshift/events")
 async def get_events(namespace: Optional[str] = None):
     try:
         return {"events": await openshift_client.get_events(namespace)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/openshift/log-alerts")
+async def get_log_alerts(hours: int = 24):
+    try:
+        return await openshift_client.scan_logs(max(1, min(hours, 72)))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -560,41 +518,13 @@ async def analyze_event(event: Dict[str, Any]):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/knowledge/runbook")
-async def add_runbook(request: AddRunbookRequest):
-    """Add a runbook to the knowledge base"""
-    if not RAG_AVAILABLE:
-        raise HTTPException(status_code=503, detail="RAG system unavailable")
-    try:
-        doc_id = rag_system.add_runbook(title=request.title, content=request.content, category=request.category, tags=request.tags)
-        return {"doc_id": doc_id, "message": "Runbook added successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/knowledge/search")
-async def search_knowledge(query: str, limit: int = 3):
-    if not RAG_AVAILABLE:
-        raise HTTPException(status_code=503, detail="RAG system unavailable")
-    try:
-        return {"results": rag_system.search(query, n_results=limit)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/knowledge/stats")
-async def get_knowledge_stats():
-    if not RAG_AVAILABLE:
-        return {"status": "unavailable"}
-    try:
-        return rag_system.get_stats()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/api/suggestions")
 async def get_suggestions():
-    return {"suggestions": ["List all pods", "Analyze cluster health", "Create nginx pod",
-                            "Delete pod nginx-pod", "Scale deployment myapp to 3 replicas",
-                            "Restart deployment myapp", "Show warning events", "Show namespaces"]}
+    return {"suggestions": ["List all pods", "Analyze cluster health", "Show unhealthy pods",
+                            "Why is my pod restarting? Give root cause", "Show warning events",
+                            "Show namespaces"]}
 
+<<<<<<< HEAD
 @app.get("/api/openshift/token-status")
 async def token_status():
     """Check if the OpenShift token is valid."""
@@ -606,10 +536,24 @@ async def token_status():
         return {"status": "error", "in_cluster": in_cluster, "message": probe["error"]}
     count = len(probe.get("items", []))
     return {"status": "valid", "in_cluster": in_cluster, "accessible_projects": count}
+=======
+@app.get("/api/openshift/connection")
+async def cluster_connection():
+    """Report whether the backend can reach the cluster with its current credentials (read-only probe)."""
+    server = openshift_client.api_url
+    probe = await openshift_client._api_request("/version")
+    if "401" in str(probe.get("error", "")) or "403" in str(probe.get("error", "")):
+        return {"status": "unauthorized", "server": server, "message": "Cluster rejected the token — reconnect with a valid one"}
+    if "error" in probe:
+        return {"status": "disconnected", "server": server, "message": probe["error"]}
+    return {"status": "connected", "server": server, "version": probe.get("gitVersion", "")}
+>>>>>>> 1801054 (Add test file)
 
-class TokenUpdateRequest(BaseModel):
+class ClusterConnectRequest(BaseModel):
+    api_url: str
     token: str
 
+<<<<<<< HEAD
 @app.post("/api/openshift/update-token")
 async def update_token(request: TokenUpdateRequest):
     """Hot-reload the OpenShift token without restarting the backend."""
@@ -623,6 +567,28 @@ async def update_token(request: TokenUpdateRequest):
         raise HTTPException(status_code=401, detail="New token is also invalid — check and try again")
     count = len(probe.get("items", []))
     return {"status": "ok", "message": f"Token updated. {count} project(s) accessible."}
+=======
+@app.post("/api/openshift/connect")
+async def connect_cluster(request: ClusterConnectRequest):
+    """Point the backend at a cluster (API URL + token) without restarting. In-memory only; read-only access."""
+    api_url = request.api_url.strip().rstrip("/")
+    token = request.token.strip()
+    if not api_url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Cluster API URL must start with https://")
+    if not token:
+        raise HTTPException(status_code=400, detail="Token is required")
+    previous = (openshift_client.api_url, openshift_client.token, openshift_client.headers["Authorization"])
+    openshift_client.api_url = api_url
+    openshift_client.token = token
+    openshift_client.headers["Authorization"] = f"Bearer {token}"
+    probe = await openshift_client._api_request("/version")
+    if "error" in probe:
+        # Roll back so a bad attempt doesn't break a working connection
+        openshift_client.api_url, openshift_client.token, openshift_client.headers["Authorization"] = previous
+        code = 401 if "401" in str(probe["error"]) or "403" in str(probe["error"]) else 502
+        raise HTTPException(status_code=code, detail=f"Could not connect: {probe['error']}")
+    return {"status": "connected", "server": api_url, "version": probe.get("gitVersion", "")}
+>>>>>>> 1801054 (Add test file)
 
 @app.get("/api/watsonx/test")
 async def test_watsonx():

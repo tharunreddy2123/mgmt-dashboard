@@ -1,12 +1,65 @@
 import os
 import httpx
-import subprocess
-import json
+import re
+import time
 from typing import List, Dict, Any, Optional
 from config import settings
 import asyncio
 
+# Short-lived cache for successful GET responses, so the dashboard's parallel
+# requests (and quick page switches) don't re-hit the cluster for the same data.
+_CACHE_TTL = 8  # seconds
+# Max concurrent per-namespace requests against the cluster API
+_NS_CONCURRENCY = 10
+
+# Log scan (Alerts page): bounded so a large cluster can't be hammered
+_LOG_SCAN_TTL = 120            # seconds
+_LOG_SCAN_CONCURRENCY = 8
+_LOG_SCAN_MAX_CONTAINERS = 300
+_LOG_SCAN_TAIL = 3000          # max lines examined per container within the window
+_ERROR_RE = re.compile(r"\b(error|fatal|exception|panic|critical|traceback|failed)\b", re.IGNORECASE)
+_WARN_RE = re.compile(r"\b(warn|warning)\b", re.IGNORECASE)
+
+# Hard read-only enforcement: every request made by this module passes through this
+# hook, so even a future coding mistake cannot send a write to the cluster.
+#  - only GET is allowed
+#  - pod/node/service subresources that open shells or tunnels (exec, attach,
+#    portforward, proxy) are refused — a GET on /exec is a websocket exec
+#  - ".." path segments are refused
+_FORBIDDEN_SUBRESOURCE = re.compile(r"/(pods|nodes|services)/[^/]+/(exec|attach|portforward|proxy)(/|$)")
+
+
+async def _read_only_guard(request: httpx.Request) -> None:
+    path = request.url.path
+    if request.method != "GET":
+        raise PermissionError(f"Read-only: {request.method} requests to the cluster are not allowed.")
+    if _FORBIDDEN_SUBRESOURCE.search(path) or ".." in path.split("/"):
+        raise PermissionError(f"Read-only: access to {path} is not allowed.")
+
+
+def _check_path(path: str) -> None:
+    # Checked on the RAW path (httpx would silently normalise '..' into a different resource)
+    if not path.startswith('/') or '..' in path.split('?')[0].split('/') or '//' in path.split('?')[0] or '\\' in path or re.search(r'%(2f|2e|5c)', path, re.I):
+        raise PermissionError(f'Read-only: invalid cluster path {path!r}')
+
+
+def _new_client(timeout, **kwargs) -> httpx.AsyncClient:
+    return httpx.AsyncClient(verify=False, timeout=timeout,
+                             event_hooks={"request": [_read_only_guard]}, **kwargs)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# READ-ONLY TRANSPORT CONTRACT
+#
+# Every public method on OpenShiftClient MUST go through _api_request() or
+# _api_request_text().  Both methods issue HTTP GET exclusively — there is no
+# POST, PUT, PATCH, or DELETE anywhere in this file.
+#
+# If you need to add a new method, use _api_request / _api_request_text.
+# Never add client.post / client.put / client.patch / client.delete here.
+# ──────────────────────────────────────────────────────────────────────────────
+
 class OpenShiftClient:
+<<<<<<< HEAD
     """Client for interacting with OpenShift API and oc commands with retry logic"""
     
     # Security whitelist - only these commands are allowed
@@ -36,6 +89,14 @@ class OpenShiftClient:
     SA_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
     IN_CLUSTER_API_URL = "https://kubernetes.default.svc"
     DEFAULT_API_URL = "https://api.rm3.7wse.p1.openshiftapps.com:6443"
+=======
+    """READ-ONLY client for the OpenShift API.
+
+    All cluster communication is HTTP GET only. There are intentionally no
+    create / update / delete / scale / exec / patch code paths.
+    The _api_request and _api_request_text methods enforce this at the call site.
+    """
+>>>>>>> 1801054 (Add test file)
 
     def __init__(self):
         # Explicit token (env var or pasted in the UI) takes priority over the in-cluster one
@@ -73,20 +134,76 @@ class OpenShiftClient:
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json"
         }
-    
+        self._client: Optional[httpx.AsyncClient] = None
+        self._cache: Dict[str, tuple] = {}
+        self._inflight: Dict[str, "asyncio.Future"] = {}
+        self._log_scan_cache: Dict[int, tuple] = {}
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Shared client: keeps TLS connections alive instead of re-handshaking per request."""
+        if self._client is None or self._client.is_closed:
+            self._client = _new_client(
+                self.timeout,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),
+            )
+        return self._client
+
     async def _api_request(self, path: str) -> Dict[str, Any]:
-        """Make a JSON request to OpenShift API with retry logic"""
+        """Cached + de-duplicated wrapper around _api_request_uncached."""
+        cached = self._cache.get(path)
+        if cached and time.monotonic() - cached[0] < _CACHE_TTL:
+            return cached[1]
+        pending = self._inflight.get(path)
+        if pending is not None:
+            return await pending
+        future = asyncio.get_running_loop().create_future()
+        self._inflight[path] = future
+        try:
+            data = await self._api_request_uncached(path)
+            if "error" not in data:
+                self._cache[path] = (time.monotonic(), data)
+            future.set_result(data)
+            return data
+        except BaseException as e:
+            future.set_exception(e)
+            future.exception()  # mark retrieved to avoid "never retrieved" warnings
+            raise
+        finally:
+            self._inflight.pop(path, None)
+
+    async def _gather_per_namespace(self, path_template: str) -> List[Dict[str, Any]]:
+        """Fetch a per-namespace list for all accessible namespaces concurrently."""
+        namespaces = await self.get_namespaces()
+        sem = asyncio.Semaphore(_NS_CONCURRENCY)
+
+        async def one(ns_name: str) -> List[Dict[str, Any]]:
+            async with sem:
+                data = await self._api_request(path_template.format(ns=ns_name))
+                return data.get("items", [])
+
+        names = [n.get("metadata", {}).get("name") for n in namespaces]
+        results = await asyncio.gather(*(one(n) for n in names if n))
+        return [item for items in results for item in items]
+
+    async def _api_request_uncached(self, path: str) -> Dict[str, Any]:
+        """Make a READ-ONLY (GET) JSON request to OpenShift API with retry logic.
+
+        This method only ever calls client.get(). No other HTTP verb is used.
+        """
+        # Safety assertion: path must not carry a body or mutation hint
+        _check_path(path)
         url = f"{self.api_url}{path}"
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                async with httpx.AsyncClient(verify=False, timeout=self.timeout) as client:
-                    response = await client.get(url, headers=self.headers)
-                    if response.status_code in (401, 403):
-                        last_error = f"HTTP {response.status_code}: insufficient permissions for {path}"
-                        break  # do not retry auth errors
-                    response.raise_for_status()
-                    return response.json()
+                client = self._get_client()
+                # ← GET only — never change this to post/put/patch/delete
+                response = await client.get(url, headers=self.headers)
+                if response.status_code in (401, 403):
+                    last_error = f"HTTP {response.status_code}: insufficient permissions for {path}"
+                    break  # do not retry auth errors
+                response.raise_for_status()
+                return response.json()
             except httpx.TimeoutException:
                 last_error = f"Request timeout after {self.timeout}s"
             except httpx.ConnectError:
@@ -99,13 +216,27 @@ class OpenShiftClient:
                 await asyncio.sleep(self.retry_delay * (attempt + 1))
         return {"error": last_error, "items": []}
 
-    async def _api_request_text(self, path: str, timeout: int = 60) -> str:
-        """Make a plain-text request to OpenShift API (used for pod logs)"""
+    async def _api_request_text(self, path: str, timeout: int = 60, quiet: bool = False) -> str:
+        """Make a READ-ONLY (GET) plain-text request to OpenShift API (used for pod logs).
+
+        This method only ever calls client.get(). No other HTTP verb is used.
+        """
+        _check_path(path)
         url = f"{self.api_url}{path}"
-        print(f"[LOG REQUEST] GET {url}", flush=True)
+        if not quiet:
+            print(f"[LOG REQUEST] GET {url}", flush=True)
         try:
-            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+            async with _new_client(timeout) as client:
+                # ← GET only — never change this to post/put/patch/delete
                 response = await client.get(url, headers=self.headers)
+                if quiet:
+                    if response.status_code == 401:
+                        return "Error: HTTP 401 - token expired or invalid"
+                    if response.status_code == 403:
+                        return "Error: HTTP 403 - insufficient permissions"
+                    if response.status_code >= 400:
+                        return f"Error: HTTP {response.status_code}"
+                    return response.text
                 print(f"[LOG RESPONSE] status={response.status_code} len={len(response.text)} bytes", flush=True)
                 if response.status_code == 401:
                     return "Error: HTTP 401 - token expired or invalid"
@@ -149,14 +280,7 @@ class OpenShiftClient:
         if namespace:
             data = await self._api_request(f"/api/v1/namespaces/{namespace}/pods")
             return data.get("items", [])
-        namespaces = await self.get_namespaces()
-        all_pods: List[Dict[str, Any]] = []
-        for ns in namespaces:
-            ns_name = ns.get("metadata", {}).get("name")
-            if ns_name:
-                data = await self._api_request(f"/api/v1/namespaces/{ns_name}/pods")
-                all_pods.extend(data.get("items", []))
-        return all_pods
+        return await self._gather_per_namespace("/api/v1/namespaces/{ns}/pods")
 
     async def get_nodes(self) -> List[Dict[str, Any]]:
         """Get cluster nodes - returns empty list if user lacks cluster-admin permission"""
@@ -171,28 +295,14 @@ class OpenShiftClient:
         if namespace:
             data = await self._api_request(f"/apis/apps/v1/namespaces/{namespace}/deployments")
             return data.get("items", [])
-        namespaces = await self.get_namespaces()
-        all_deps: List[Dict[str, Any]] = []
-        for ns in namespaces:
-            ns_name = ns.get("metadata", {}).get("name")
-            if ns_name:
-                data = await self._api_request(f"/apis/apps/v1/namespaces/{ns_name}/deployments")
-                all_deps.extend(data.get("items", []))
-        return all_deps
+        return await self._gather_per_namespace("/apis/apps/v1/namespaces/{ns}/deployments")
 
     async def get_events(self, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get events per accessible namespace"""
         if namespace:
             data = await self._api_request(f"/api/v1/namespaces/{namespace}/events")
             return data.get("items", [])
-        namespaces = await self.get_namespaces()
-        all_events: List[Dict[str, Any]] = []
-        for ns in namespaces:
-            ns_name = ns.get("metadata", {}).get("name")
-            if ns_name:
-                data = await self._api_request(f"/api/v1/namespaces/{ns_name}/events")
-                all_events.extend(data.get("items", []))
-        return all_events
+        return await self._gather_per_namespace("/api/v1/namespaces/{ns}/events")
 
     async def get_pod_logs(self, namespace: str, pod_name: str, tail_lines: int = 0, container: Optional[str] = None) -> str:
         """Get logs from a specific pod.
@@ -254,6 +364,77 @@ class OpenShiftClient:
             f"To fix: ask a cluster admin to grant:\n"
             f"  verb: get  resource: pods/log  namespace: {namespace}"
         )
+
+    async def scan_logs(self, hours: int = 24) -> Dict[str, Any]:
+        """Scan the last `hours` of container logs for error / warning lines.
+
+        READ-ONLY: uses GET on the pods/log sub-resource only. Results are cached
+        briefly because a full scan touches every container in the cluster.
+        """
+        cached = self._log_scan_cache.get(hours)
+        if cached and time.monotonic() - cached[0] < _LOG_SCAN_TTL:
+            return cached[1]
+
+        pods = await self.get_pods()
+        targets: List[tuple] = []
+        for p in pods:
+            if p.get("status", {}).get("phase") not in ("Running", "Failed"):
+                continue
+            meta = p.get("metadata", {})
+            for c in p.get("spec", {}).get("containers", []):
+                if c.get("name"):
+                    targets.append((meta.get("namespace"), meta.get("name"), c["name"]))
+        total_containers = len(targets)
+        targets = targets[:_LOG_SCAN_MAX_CONTAINERS]
+
+        sem = asyncio.Semaphore(_LOG_SCAN_CONCURRENCY)
+        since = hours * 3600
+
+        async def scan_one(ns: str, pod: str, ctr: str) -> Optional[Dict[str, Any]]:
+            async with sem:
+                path = (f"/api/v1/namespaces/{ns}/pods/{pod}/log"
+                        f"?container={ctr}&sinceSeconds={since}&timestamps=true&tailLines={_LOG_SCAN_TAIL}")
+                text = await self._api_request_text(path, timeout=30, quiet=True)
+            if text.startswith("Error:"):
+                return {"inaccessible": True}
+            errors: List[Dict[str, str]] = []
+            warnings: List[Dict[str, str]] = []
+            err_n = warn_n = 0
+            for line in text.splitlines():
+                if _ERROR_RE.search(line):
+                    level = "error"
+                elif _WARN_RE.search(line):
+                    level = "warning"
+                else:
+                    continue
+                ts, _, msg = line.partition(" ")
+                sample = {"ts": ts, "level": level, "message": (msg or line)[:400]}
+                if level == "error":
+                    err_n += 1
+                    errors.append(sample)
+                else:
+                    warn_n += 1
+                    warnings.append(sample)
+            if not err_n and not warn_n:
+                return None
+            return {
+                "namespace": ns, "pod": pod, "container": ctr,
+                "error_count": err_n, "warning_count": warn_n,
+                "samples": errors[-5:] + warnings[-3:],
+            }
+
+        results = await asyncio.gather(*(scan_one(*t) for t in targets))
+        findings = [r for r in results if r and not r.get("inaccessible")]
+        findings.sort(key=lambda f: (f["error_count"], f["warning_count"]), reverse=True)
+        data = {
+            "window_hours": hours,
+            "containers_total": total_containers,
+            "containers_scanned": len(targets),
+            "inaccessible": sum(1 for r in results if r and r.get("inaccessible")),
+            "findings": findings,
+        }
+        self._log_scan_cache[hours] = (time.monotonic(), data)
+        return data
 
     async def get_cluster_health(self) -> Dict[str, Any]:
         """Get overall cluster health across all accessible namespaces"""
@@ -446,235 +627,6 @@ class OpenShiftClient:
             lines.append("\nEvents:  <none>")
 
         return "\n".join(lines)
-
-    def is_command_allowed(self, command: str) -> bool:
-        """Check if a command is in the whitelist"""
-        # Remove extra spaces and normalize
-        cmd = " ".join(command.split())
-        
-        # Check against whitelist patterns
-        for allowed in self.ALLOWED_COMMANDS:
-            # Replace placeholders with regex patterns
-            pattern = allowed.replace("{namespace}", r"\S+")
-            pattern = pattern.replace("{pod}", r"\S+")
-            pattern = pattern.replace("{node}", r"\S+")
-            
-            import re
-            if re.match(f"^{pattern}$", cmd):
-                return True
-        return False
-    
-    # ── Write / action operations ─────────────────────────────────────────────
-
-    async def create_resource(self, namespace: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a Kubernetes resource via POST to the API"""
-        kind = manifest.get("kind", "")
-        api_version = manifest.get("apiVersion", "v1")
-
-        # Build the correct API path based on kind
-        group_version, path = self._resource_path(kind, api_version, namespace)
-        url = f"{self.api_url}{path}"
-
-        headers = dict(self.headers)
-        headers["Content-Type"] = "application/json"
-
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
-                resp = await client.post(url, headers=headers, content=json.dumps(manifest))
-                if resp.status_code in (200, 201):
-                    return {"success": True, "resource": resp.json()}
-                return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    async def delete_resource(self, namespace: str, kind: str, name: str) -> Dict[str, Any]:
-        """Delete a named Kubernetes resource"""
-        _, path = self._resource_path(kind, "v1", namespace)
-        # replace list path with named path
-        url = f"{self.api_url}{path}/{name}"
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
-                resp = await client.delete(url, headers=self.headers)
-                if resp.status_code in (200, 202, 204):
-                    return {"success": True, "message": f"{kind}/{name} deleted"}
-                return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    async def scale_deployment(self, namespace: str, name: str, replicas: int) -> Dict[str, Any]:
-        """Patch a Deployment's replica count"""
-        url = f"{self.api_url}/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale"
-        patch = {"spec": {"replicas": replicas}}
-        headers = dict(self.headers)
-        headers["Content-Type"] = "application/merge-patch+json"
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
-                resp = await client.patch(url, headers=headers, content=json.dumps(patch))
-                if resp.status_code == 200:
-                    return {"success": True, "message": f"Deployment {name} scaled to {replicas} replicas"}
-                return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    async def restart_deployment(self, namespace: str, name: str) -> Dict[str, Any]:
-        """Rollout restart a deployment by patching its annotation"""
-        import datetime
-        url = f"{self.api_url}/apis/apps/v1/namespaces/{namespace}/deployments/{name}"
-        patch = {
-            "spec": {
-                "template": {
-                    "metadata": {
-                        "annotations": {
-                            "kubectl.kubernetes.io/restartedAt": datetime.datetime.utcnow().isoformat()
-                        }
-                    }
-                }
-            }
-        }
-        headers = dict(self.headers)
-        headers["Content-Type"] = "application/merge-patch+json"
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
-                resp = await client.patch(url, headers=headers, content=json.dumps(patch))
-                if resp.status_code == 200:
-                    return {"success": True, "message": f"Deployment {name} restart triggered"}
-                return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:300]}"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def _resource_path(self, kind: str, api_version: str, namespace: str) -> tuple:
-        """Return (group_version, api_path) for a given resource kind"""
-        kind_lower = kind.lower()
-        ns = f"/namespaces/{namespace}" if namespace else ""
-        # Core API group resources
-        core = {
-            "pod": ("v1", f"/api/v1{ns}/pods"),
-            "service": ("v1", f"/api/v1{ns}/services"),
-            "configmap": ("v1", f"/api/v1{ns}/configmaps"),
-            "secret": ("v1", f"/api/v1{ns}/secrets"),
-            "persistentvolumeclaim": ("v1", f"/api/v1{ns}/persistentvolumeclaims"),
-        }
-        apps = {
-            "deployment": ("apps/v1", f"/apis/apps/v1{ns}/deployments"),
-            "statefulset": ("apps/v1", f"/apis/apps/v1{ns}/statefulsets"),
-            "daemonset": ("apps/v1", f"/apis/apps/v1{ns}/daemonsets"),
-            "replicaset": ("apps/v1", f"/apis/apps/v1{ns}/replicasets"),
-        }
-        route = {
-            "route": ("route.openshift.io/v1", f"/apis/route.openshift.io/v1{ns}/routes"),
-        }
-        all_kinds = {**core, **apps, **route}
-        if kind_lower in all_kinds:
-            return all_kinds[kind_lower]
-        # Fallback: try apps group
-        plural = kind_lower + "s"
-        return (api_version, f"/apis/apps/v1{ns}/{plural}")
-
-    async def oc_scale(self, namespace: str, name: str, replicas: int) -> Dict[str, Any]:
-        """Scale a workload by running `oc scale` for each resource type in sequence.
-
-        Tries: deployment → deploymentconfig → replicationcontroller.
-        Returns the first success, or the last error if all fail.
-        """
-        import re as _re
-
-        resource_types = ["deployment", "deploymentconfig", "replicationcontroller", "statefulset"]
-        last_error = ""
-
-        for rtype in resource_types:
-            cmd = f"oc scale {rtype} {name} --replicas={replicas} -n {namespace}"
-
-            # Validate against whitelist before running
-            cmd_normalised = " ".join(cmd.split())
-            allowed = False
-            for pattern_tpl in self.ALLOWED_COMMANDS:
-                pat = pattern_tpl.replace("{namespace}", r"\S+") \
-                                 .replace("{name}", r"[\w-]+") \
-                                 .replace("{replicas}", r"\d+")
-                if _re.match(f"^{pat}$", cmd_normalised):
-                    allowed = True
-                    break
-            if not allowed:
-                continue  # should never happen given the whitelist above
-
-            try:
-                env = {"OC_TOKEN": self.token, "HOME": "/tmp"}
-                result = subprocess.run(
-                    ["oc", "scale", rtype, name, f"--replicas={replicas}", "-n", namespace,
-                     "--token", self.token, "--server", self.api_url,
-                     "--insecure-skip-tls-verify=true"],
-                    capture_output=True, text=True, timeout=30
-                )
-                stdout = result.stdout.strip()
-                stderr = result.stderr.strip()
-
-                if result.returncode == 0:
-                    # e.g. "deployment.apps/nginx scaled" or "replicationcontroller/nginx scaled"
-                    msg = stdout or f"{rtype}/{name} scaled to {replicas} replica(s)"
-                    return {"success": True, "message": msg, "resource_type": rtype, "replicas": replicas}
-
-                # "not found" means this resource type doesn't exist — try the next one
-                if "not found" in stderr.lower() or "NotFound" in stderr:
-                    last_error = stderr
-                    continue
-
-                # Any other error (permissions, etc.) — surface immediately
-                return {"success": False, "error": stderr or stdout}
-
-            except subprocess.TimeoutExpired:
-                return {"success": False, "error": f"oc scale timed out for {rtype}/{name}"}
-            except FileNotFoundError:
-                # `oc` binary not in PATH — fall back to API-based scaling
-                return await self._oc_scale_via_api(namespace, name, replicas)
-            except Exception as e:
-                return {"success": False, "error": str(e)}
-
-        return {"success": False, "error": last_error or f"No Deployment, DeploymentConfig or ReplicationController named '{name}' found in '{namespace}'"}
-
-    async def _oc_scale_via_api(self, namespace: str, name: str, replicas: int) -> Dict[str, Any]:
-        """API fallback when oc binary is not available: tries all three controller types."""
-        candidates = [
-            ("deployment",            f"/apis/apps/v1/namespaces/{namespace}/deployments/{name}/scale"),
-            ("deploymentconfig",      f"/apis/apps.openshift.io/v1/namespaces/{namespace}/deploymentconfigs/{name}/scale"),
-            ("replicationcontroller", f"/api/v1/namespaces/{namespace}/replicationcontrollers/{name}/scale"),
-            ("statefulset",           f"/apis/apps/v1/namespaces/{namespace}/statefulsets/{name}/scale"),
-        ]
-        patch = json.dumps({"spec": {"replicas": replicas}})
-        headers = dict(self.headers)
-        headers["Content-Type"] = "application/merge-patch+json"
-        last_error = ""
-        for rtype, path in candidates:
-            url = f"{self.api_url}{path}"
-            try:
-                async with httpx.AsyncClient(verify=False, timeout=30) as client:
-                    resp = await client.patch(url, headers=headers, content=patch)
-                    if resp.status_code == 200:
-                        return {"success": True,
-                                "message": f"{rtype}/{name} scaled to {replicas} replica(s)",
-                                "resource_type": rtype, "replicas": replicas}
-                    if resp.status_code == 404:
-                        last_error = f"{rtype}/{name} not found"
-                        continue
-                    if resp.status_code in (401, 403):
-                        return {"success": False, "error": f"HTTP {resp.status_code}: insufficient permissions to scale {rtype}/{name} in {namespace}"}
-                    last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-            except Exception as e:
-                last_error = str(e)
-        return {"success": False, "error": last_error or f"No scalable controller '{name}' found in '{namespace}'"}
-
-    def execute_safe_command(self, command: str) -> str:
-        """Execute a whitelisted oc command"""
-        if not self.is_command_allowed(command):
-            return f"Error: Command '{command}' is not allowed."
-        try:
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True, timeout=30
-            )
-            return result.stdout if result.returncode == 0 else result.stderr
-        except subprocess.TimeoutExpired:
-            return "Error: Command timed out"
-        except Exception as e:
-            return f"Error executing command: {str(e)}"
 
 
 # Singleton instance

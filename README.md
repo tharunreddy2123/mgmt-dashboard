@@ -1,151 +1,81 @@
 # OpenShift AI Assistant
 
-AI-powered DevOps dashboard for OpenShift cluster management with **IBM watsonx.ai** integration.
+AI-powered dashboard for OpenShift cluster management (React + FastAPI + IBM watsonx.ai).
 
-![Stack](https://img.shields.io/badge/Stack-React%20%2B%20FastAPI%20%2B%20watsonx.ai-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
-![Node](https://img.shields.io/badge/Node-18%2B-green)
+## Run locally
 
-## Features
+```powershell
+# Frontend
+npm install
+Copy-Item .env.example .env
 
-### AI-Powered Assistance
-- **Natural Language Queries** - Ask questions in plain English
-- **Cluster Health Analysis** - AI-powered cluster diagnostics via IBM watsonx.ai
-- **Log Analysis** - Intelligent log interpretation
-- **Event Explanation** - Understand OpenShift events
-- **Troubleshooting Guidance** - Step-by-step problem resolution
+# Backend (second terminal)
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env        # fill in values
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-### RAG (Retrieval Augmented Generation)
-- **Runbook Integration** - Access troubleshooting guides
-- **Documentation Search** - Find relevant SOPs instantly
-- **Incident History** - Learn from past incidents
-- **Custom Knowledge Base** - Add your own documentation
-
-### Security First
-- **Token-Based Auth** - Secure OpenShift token management
-- **Command Whitelist** - Only approved operations
-- **Hot Token Reload** - Refresh expired tokens without restart
-
-### Real-Time Monitoring
-- **Pod Status** - Monitor all pods across namespaces
-- **Node Health** - Track node conditions and resources
-- **Deployments** - View and scale deployment replicas
-- **Events** - Real-time cluster events
-- **Logs** - Access pod logs instantly
-
-## Quick Start
-
-### Prerequisites
-- **Python 3.9+** and **Node.js 18+**
-- **IBM watsonx.ai** API key + project ID
-- **OpenShift cluster** access token (`sha256~…`)
-
-### Get Running in 5 Minutes
-
-1. **Configure backend:**
-   ```bash
-   cd backend
-   cp .env.example .env
-   # Edit .env: set OPENSHIFT_TOKEN, WATSONX_API_KEY, WATSONX_PROJECT_ID
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   cd backend && pip install -r requirements.txt
-   cd .. && npm install
-   ```
-
-3. **Start services (2 terminals):**
-   ```bash
-   # Terminal 1 — backend
-   cd backend && python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-   # Terminal 2 — frontend
-   npm run dev
-   ```
-
-4. **Open:** http://localhost:5173
-
-## Example Queries
-
-- "Show unhealthy pods"
-- "Analyze cluster health"
-- "Why is my pod restarting?"
-- "Explain this CrashLoopBackOff error"
-- "Create nginx pod"
-- "Scale deployment myapp to 3 replicas"
-- "Show warning events"
-
-## Project Structure
-
-```
-project/
-├── backend/                    # FastAPI backend
-│   ├── main.py                 # API endpoints
-│   ├── config.py               # Configuration (pydantic-settings)
-│   ├── openshift_client.py     # OpenShift REST API client
-│   ├── watsonx_client.py       # IBM watsonx.ai client
-│   ├── rag_system.py           # RAG with ChromaDB
-│   └── requirements.txt        # Python dependencies
-├── netlify/
-│   └── functions/
-│       └── api.ts              # Netlify Function proxy → backend
-├── src/                        # React + Vite frontend
-│   ├── components/
-│   ├── pages/
-│   └── lib/
-│       └── api-client.ts       # Backend API client
-├── netlify.toml                # Netlify build + routing config
-└── public/_redirects           # SPA fallback routing
+# Frontend (first terminal, repo root)
+npm run dev                         # http://localhost:5173
 ```
 
-## Configuration
+## Deploy to Red Hat OpenShift
 
-### Backend (`backend/.env`)
+Architecture: an nginx **frontend** (serves the SPA and proxies `/api` and `/health`) and a FastAPI **backend**, both built in-cluster with `BuildConfig`s and exposed through a single TLS `Route`. See [`openshift/app.yaml`](openshift/app.yaml).
 
-```env
-OPENSHIFT_API_URL=https://api.rm3.7wse.p1.openshiftapps.com:6443
-OPENSHIFT_TOKEN=sha256~your_token
+### Read-only by design
 
-WATSONX_API_KEY=your_ibm_cloud_api_key
-WATSONX_BASE_URL=https://eu-gb.ml.cloud.ibm.com
-WATSONX_PROJECT_ID=your_project_id
-WATSONX_MODEL=meta-llama/llama-3-3-70b-instruct
+The application (and the watsonx.ai / ICA assistants) can only **read** the cluster: pods, logs, events, nodes, deployments, namespaces. There is no code path that creates, updates, deletes, scales, restarts or execs. Chat requests asking for such changes are refused before any model call, and `/api/action` only accepts `logs` and `describe`.
 
-API_HOST=0.0.0.0
-API_PORT=8000
-CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+Defence in depth: give the app a token from a service account that only has the `view` role, so the cluster itself rejects writes even if the code were changed:
+
+```bash
+oc create serviceaccount ai-dashboard-reader -n <namespace>
+oc adm policy add-cluster-role-to-user view -z ai-dashboard-reader -n <namespace>   # or `view` per project
+oc create token ai-dashboard-reader -n <namespace> --duration=8760h                  # -> APP_OPENSHIFT_TOKEN
 ```
 
-## Deployment
+Note: `view` does not include `pods/log` for every cluster configuration or node access; grant `get` on `pods/log` and `nodes` as read-only extras if you need them.
 
-See [DEPLOYMENT_README.md](DEPLOYMENT_README.md) for full Netlify + Render deployment guide.
+### GitHub repository secrets
 
-**Quick summary:**
-- Frontend → **Netlify** (auto-deploys from git)
-- Backend → **Render.com** (free Python web service)
+Add these under **Settings → Secrets and variables → Actions**:
 
-## API Endpoints
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `OPENSHIFT_SERVER` | yes | API URL, e.g. `https://api.<cluster>:6443` |
+| `OPENSHIFT_TOKEN` | yes | Token the **pipeline** uses to deploy (needs edit rights on the project) |
+| `APP_OPENSHIFT_TOKEN` | yes | **Read-only** (`view`) service-account token used by the running app |
+| `OPENSHIFT_NAMESPACE` | yes | Target project |
+| `WATSONX_API_KEY` | yes | watsonx.ai API key |
+| `WATSONX_PROJECT_ID` | yes | watsonx.ai project ID |
+| `ICA_API_KEY` | yes | ICA key (starts with `sk-`) |
+| `WATSONX_BASE_URL`, `WATSONX_MODEL`, `ICA_MODEL` | no | Override defaults |
+
+Pushing to `main` runs [`.github/workflows/deploy-openshift.yml`](.github/workflows/deploy-openshift.yml), which creates the `ai-dashboard-secrets` Secret, applies the manifests, builds both images on the cluster and rolls out. The app URL is printed at the end (`oc get route ai-dashboard`).
+
+### Manual deploy
+
+```bash
+oc project <namespace>
+oc create secret generic ai-dashboard-secrets \
+  --from-literal=OPENSHIFT_API_URL=... --from-literal=OPENSHIFT_TOKEN=<read-only-token> \
+  --from-literal=WATSONX_API_KEY=... --from-literal=WATSONX_PROJECT_ID=... \
+  --from-literal=ICA_API_KEY=...
+oc apply -f openshift/app.yaml
+oc start-build ai-dashboard-backend  --from-dir=backend --follow
+oc start-build ai-dashboard-frontend --from-dir=. --follow
+```
+
+## API endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/chat` | Chat with cluster context |
-| POST | `/api/chat/quick` | Quick chat (no RAG) |
-| GET | `/api/openshift/namespaces` | List namespaces |
-| GET | `/api/openshift/pods` | List pods |
-| GET | `/api/openshift/nodes` | List nodes |
-| GET | `/api/openshift/deployments` | List deployments |
-| GET | `/api/openshift/events` | List events |
+| GET | `/api/openshift/{namespaces,pods,nodes,deployments,events}` | Cluster resources |
 | GET | `/api/openshift/cluster-health` | Cluster health + AI analysis |
-| POST | `/api/openshift/scale` | Scale a workload |
+| POST | `/api/action` | Read-only: `logs` / `describe` only (others return 403) |
 | POST | `/api/analyze/logs` | AI log analysis |
-| GET | `/health` | Backend health check |
-
-## License
-
-MIT License
-
----
-
-**Built for DevOps teams — powered by IBM watsonx.ai**
+| GET | `/health` | Health check |
