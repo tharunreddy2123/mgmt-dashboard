@@ -13,18 +13,11 @@ export default function Header() {
   const [time, setTime] = useState(new Date());
   const [refreshing, setRefreshing] = useState(false);
 
-<<<<<<< HEAD
-  // Token status
-  const [tokenExpired, setTokenExpired] = useState(false);
-  const [inCluster, setInCluster] = useState(false);
-  const [showTokenModal, setShowTokenModal] = useState(false);
-=======
   // Cluster connection
   const [conn, setConn] = useState<ConnStatus>('unknown');
   const [server, setServer] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [urlInput, setUrlInput] = useState('');
->>>>>>> 1801054 (Add test file)
   const [tokenInput, setTokenInput] = useState('');
   const [tokenVisible, setTokenVisible] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -41,13 +34,8 @@ export default function Header() {
       const res = await fetch(`${BACKEND_URL}/api/openshift/connection`);
       if (!res.ok) return;
       const data = await res.json();
-<<<<<<< HEAD
-      setTokenExpired(data.status === 'expired');
-      setInCluster(Boolean(data.in_cluster));
-=======
       setConn(data.status as ConnStatus);
       setServer(data.server || '');
->>>>>>> 1801054 (Add test file)
     } catch { /* backend not reachable — ignore */ }
   }, []);
 
@@ -71,16 +59,9 @@ export default function Header() {
     setShowModal(true);
   };
 
-<<<<<<< HEAD
-  const saveToken = async () => {
-    const t = tokenInput.trim();
-    setTokenSaving(true);
-    setTokenMsg(null);
-=======
   const connect = async () => {
     setConnecting(true);
     setMsg(null);
->>>>>>> 1801054 (Add test file)
     try {
       const res = await fetch(`${BACKEND_URL}/api/openshift/connect`, {
         method: 'POST',
@@ -157,16 +138,9 @@ export default function Header() {
         </div>
 
         <div className="flex items-center gap-3">
-<<<<<<< HEAD
-          {/* Token refresh button (hidden when the backend authenticates via the pod's service account) */}
-          {!inCluster && <button
-            onClick={openTokenModal}
-            title="Update OpenShift token"
-=======
           <button
             onClick={openModal}
             title={server ? `Cluster: ${server}` : 'Connect to a cluster'}
->>>>>>> 1801054 (Add test file)
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               bad
                 ? 'bg-red-500 text-white hover:bg-red-600'
@@ -175,15 +149,9 @@ export default function Header() {
                   : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700'
             }`}
           >
-<<<<<<< HEAD
-            <KeyRound size={13} />
-            {tokenExpired ? 'Refresh Token' : 'Token'}
-          </button>}
-=======
             <Plug size={13} />
             Connect to cluster
           </button>
->>>>>>> 1801054 (Add test file)
 
           <button
             onClick={handleRefresh}
@@ -229,33 +197,18 @@ export default function Header() {
             </div>
 
             <div className="px-5 py-4 space-y-4 text-sm">
-<<<<<<< HEAD
-              <ol className={`space-y-1.5 text-xs leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                <li>1. Go to your <a href="https://console.apps.rm3.7wse.p1.openshiftapps.com" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">OpenShift Console</a></li>
-                <li>2. Click your username (top-right) → <strong className={isDark ? 'text-gray-200' : 'text-gray-700'}>Copy login command</strong> → <strong className={isDark ? 'text-gray-200' : 'text-gray-700'}>Display Token</strong></li>
-                <li>3. Copy the token and paste it below</li>
-              </ol>
-=======
               <p className={`text-xs leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                 Enter the cluster API URL and a token (OpenShift console → username → <strong>Copy login command</strong> → <strong>Display Token</strong>).
                 Access is read-only. Credentials are kept in backend memory only and are not saved.
               </p>
->>>>>>> 1801054 (Add test file)
 
               <div className="space-y-1.5">
                 <label className={`text-xs font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Cluster API URL</label>
                 <input
-<<<<<<< HEAD
-                  type={tokenVisible ? 'text' : 'password'}
-                  value={tokenInput}
-                  onChange={e => setTokenInput(e.target.value)}
-                  placeholder="Paste your token here..."
-=======
                   type="text"
                   value={urlInput}
                   onChange={e => setUrlInput(e.target.value)}
                   placeholder="https://api.<cluster-domain>:6443"
->>>>>>> 1801054 (Add test file)
                   autoComplete="off"
                   className={`w-full rounded-lg border px-3 py-2.5 text-xs font-mono outline-none ${isDark ? 'bg-white/[0.04] border-white/[0.08] text-white placeholder-gray-600' : 'bg-gray-50 border-gray-200 text-gray-900 placeholder-gray-400'}`}
                 />

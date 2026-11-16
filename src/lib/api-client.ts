@@ -7,13 +7,7 @@ const getBackendUrl = (): string => {
     return envUrl.replace(/\/$/, "");
   }
 
-<<<<<<< HEAD
-  // Production default: same origin. The web server (nginx on OpenShift, see
-  // nginx.conf.template) forwards /api and /health to the backend service.
-  // Netlify sets VITE_BACKEND_API_URL=/.netlify/functions/api in netlify.toml.
-=======
   // Production on OpenShift: same-origin, nginx proxies /api and /health to the backend service
->>>>>>> 1801054 (Add test file)
   if (import.meta.env.PROD) {
     return '';
   }

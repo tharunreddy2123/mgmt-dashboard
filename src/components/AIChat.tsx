@@ -22,10 +22,7 @@ interface AIChatProps {
   isOpen: boolean;
   onClose: () => void;
   initialMessage?: string;
-<<<<<<< HEAD
-=======
   incident?: ChatIncident;
->>>>>>> 1801054 (Add test file)
 }
 
 // Inline formatting: `code` and **bold**
@@ -111,14 +108,6 @@ const SUGGESTION_GROUPS = [
 
 type AIProvider = 'watsonx' | 'ica';
 
-<<<<<<< HEAD
-const WELCOME_MESSAGE = 'Hello! I\'m your OpenShift AI assistant.\n\nI am connected to your live cluster and can:\n\n• Show pods, nodes, deployments, events and namespaces\n• Diagnose CrashLoopBackOff, OOMKilled, Pending pods\n• Analyze cluster health with AI insights\n• Explain warning events and suggest fixes\n• Provide RCA and remediation for ServiceNow incidents\n\nPick a quick action below or type your question.';
-
-export default function AIChat({ isOpen, onClose, initialMessage }: AIChatProps) {
-  const [provider, setProvider] = useState<AIProvider>('watsonx');
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: WELCOME_MESSAGE, timestamp: new Date() }
-=======
 const WELCOME =
   'Hello! I\'m your OpenShift AI assistant.\n\nI am connected to your live cluster and can:\n\n• Show pods, nodes, deployments, events and namespaces\n• Diagnose CrashLoopBackOff, OOMKilled, Pending pods\n• Analyze cluster health with AI insights\n• Explain warning events and suggest fixes\n• Answer any OpenShift / Kubernetes question\n\nPick a quick action below or type your question.';
 
@@ -126,19 +115,14 @@ export default function AIChat({ isOpen, onClose, initialMessage, incident }: AI
   const [provider, setProvider] = useState<AIProvider>('watsonx');
   const [messages, setMessages] = useState<Message[]>([
     { role: 'assistant', content: WELCOME, timestamp: new Date() },
->>>>>>> 1801054 (Add test file)
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [loadingText, setLoadingText] = useState('Fetching live cluster data...');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-<<<<<<< HEAD
-  const firedInitial = useRef(false);
-=======
   // track which initialMessage we already fired so we don't re-send on re-renders
   const firedInitialRef = useRef<string | null>(null);
->>>>>>> 1801054 (Add test file)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -150,23 +134,6 @@ export default function AIChat({ isOpen, onClose, initialMessage, incident }: AI
     }
   }, [isOpen]);
 
-<<<<<<< HEAD
-  // Auto-fire initialMessage (e.g. from an incident "Investigate" button)
-  useEffect(() => {
-    if (isOpen && initialMessage && !firedInitial.current) {
-      firedInitial.current = true;
-      // Reset messages to welcome, then send the incident prompt
-      setMessages([{ role: 'assistant', content: WELCOME_MESSAGE, timestamp: new Date() }]);
-      sendMessage(initialMessage);
-    }
-    if (!isOpen) {
-      firedInitial.current = false;
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, initialMessage]);
-
-  const sendMessage = async (messageText: string) => {
-=======
   // Auto-send initialMessage when the chat is opened with one
   useEffect(() => {
     if (isOpen && initialMessage && firedInitialRef.current !== initialMessage) {
@@ -182,7 +149,6 @@ export default function AIChat({ isOpen, onClose, initialMessage, incident }: AI
   }, [isOpen, initialMessage]);
 
   const sendMessage = async (messageText: string, incidentRef?: ChatIncident) => {
->>>>>>> 1801054 (Add test file)
     if (!messageText.trim() || isLoading) return;
 
     // For incident RCA, show a short readable question instead of the long generated prompt
@@ -375,13 +341,8 @@ export default function AIChat({ isOpen, onClose, initialMessage, incident }: AI
         </div>
 
         {/* Quick-action suggestion chips */}
-<<<<<<< HEAD
-        {messages.length === 1 && (
-          <div className="px-4 pb-3">
-=======
         {messages.length === 1 && !initialMessage && (
           <div className="px-6 pb-4">
->>>>>>> 1801054 (Add test file)
             <p className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2">
               Quick actions
             </p>

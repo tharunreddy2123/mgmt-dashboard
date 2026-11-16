@@ -28,7 +28,6 @@ const navItems = [
   { to: '/nodes', icon: Server, label: 'Nodes' },
   { to: '/logs', icon: FileText, label: 'Logs' },
   { to: '/alerts', icon: Bell, label: 'Alerts' },
-  { to: '/incidents', icon: Siren, label: 'Incidents' },
 ];
 
 interface SidebarProps {
@@ -54,11 +53,7 @@ export default function Sidebar({ onOpenChat }: SidebarProps) {
         {!collapsed && (
           <div className="overflow-hidden">
             <h1 className={`text-sm font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
-<<<<<<< HEAD
-              IBM
-=======
               IBM AI Ops
->>>>>>> 1801054 (Add test file)
             </h1>
             <p className={`text-[10px] ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>Intelligent Operations</p>
           </div>

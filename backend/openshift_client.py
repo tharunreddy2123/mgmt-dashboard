@@ -59,44 +59,18 @@ def _new_client(timeout, **kwargs) -> httpx.AsyncClient:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class OpenShiftClient:
-<<<<<<< HEAD
-    """Client for interacting with OpenShift API and oc commands with retry logic"""
-    
-    # Security whitelist - only these commands are allowed
-    ALLOWED_COMMANDS = [
-        "oc get pods -A",
-        "oc get pods -n {namespace}",
-        "oc get nodes",
-        "oc get events -A",
-        "oc get events -n {namespace}",
-        "oc get deployments -A",
-        "oc get deployments -n {namespace}",
-        "oc get namespaces",
-        "oc get projects",
-        "oc describe pod {pod} -n {namespace}",
-        "oc describe node {node}",
-        "oc logs {pod} -n {namespace}",
-        "oc logs {pod} -n {namespace} --tail=100",
-        "oc get all -n {namespace}",
-        "oc scale deployment {name} --replicas={replicas} -n {namespace}",
-        "oc scale deploymentconfig {name} --replicas={replicas} -n {namespace}",
-        "oc scale replicationcontroller {name} --replicas={replicas} -n {namespace}",
-        "oc scale statefulset {name} --replicas={replicas} -n {namespace}",
-    ]
-    
-    # Service-account credentials that OpenShift mounts into every pod
-    SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-    SA_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-    IN_CLUSTER_API_URL = "https://kubernetes.default.svc"
-    DEFAULT_API_URL = "https://api.rm3.7wse.p1.openshiftapps.com:6443"
-=======
     """READ-ONLY client for the OpenShift API.
 
     All cluster communication is HTTP GET only. There are intentionally no
     create / update / delete / scale / exec / patch code paths.
     The _api_request and _api_request_text methods enforce this at the call site.
     """
->>>>>>> 1801054 (Add test file)
+
+    # Service-account credentials that OpenShift mounts into every pod
+    SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    SA_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+    IN_CLUSTER_API_URL = "https://kubernetes.default.svc"
+    DEFAULT_API_URL = "https://api.rm3.7wse.p1.openshiftapps.com:6443"
 
     def __init__(self):
         # Explicit token (env var or pasted in the UI) takes priority over the in-cluster one
@@ -107,6 +81,10 @@ class OpenShiftClient:
         self.max_retries = settings.max_retries
         self.retry_delay = settings.retry_delay
         self.timeout = settings.request_timeout
+        self._client: Optional[httpx.AsyncClient] = None
+        self._cache: Dict[str, tuple] = {}
+        self._inflight: Dict[str, "asyncio.Future"] = {}
+        self._log_scan_cache: Dict[int, tuple] = {}
 
     @property
     def in_cluster(self) -> bool:
@@ -134,10 +112,6 @@ class OpenShiftClient:
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json"
         }
-        self._client: Optional[httpx.AsyncClient] = None
-        self._cache: Dict[str, tuple] = {}
-        self._inflight: Dict[str, "asyncio.Future"] = {}
-        self._log_scan_cache: Dict[int, tuple] = {}
 
     def _get_client(self) -> httpx.AsyncClient:
         """Shared client: keeps TLS connections alive instead of re-handshaking per request."""

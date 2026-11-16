@@ -4,20 +4,6 @@ import Sidebar from './Sidebar';
 import Header from './Header';
 import AIChat, { type ChatIncident } from './AIChat';
 import { useTheme } from '../context/ThemeContext';
-<<<<<<< HEAD
-
-export default function Layout() {
-  const { isDark } = useTheme();
-  const [isChatOpen, setIsChatOpen]         = useState(false);
-  const [chatInitialMsg, setChatInitialMsg] = useState<string | undefined>();
-
-  // openChat is used by child pages (e.g. Incidents "Investigate" button)
-  // to pop open the floating AI chat panel with a pre-built prompt.
-  const openChat = (initialMessage?: string) => {
-    setChatInitialMsg(initialMessage);
-    setIsChatOpen(true);
-  };
-=======
 
 // Pages that need to open the AI chat with a pre-filled message use this context.
 // Pass `incident` to make the backend run a targeted RCA on that pod/node.
@@ -46,7 +32,6 @@ export default function Layout() {
     setChatInitialMessage(undefined);
     setChatIncident(undefined);
   };
->>>>>>> 1801054 (Add test file)
 
   return (
     <div className={`min-h-screen ${isDark ? 'bg-[#060a14] text-white' : 'bg-gray-50 text-gray-900'}`}>
@@ -54,17 +39,6 @@ export default function Layout() {
       <div className="ml-[240px] transition-all duration-300">
         <Header />
         <main className="p-6">
-<<<<<<< HEAD
-          <Outlet context={{ openChat }} />
-        </main>
-      </div>
-
-      {/* Floating AI Chat panel — triggered only from Incidents "Investigate" button */}
-      <AIChat
-        isOpen={isChatOpen}
-        onClose={() => setIsChatOpen(false)}
-        initialMessage={chatInitialMsg}
-=======
           <Outlet context={{ openChatWithMessage } satisfies LayoutContext} />
         </main>
       </div>
@@ -75,7 +49,6 @@ export default function Layout() {
         onClose={handleClose}
         initialMessage={chatInitialMessage}
         incident={chatIncident}
->>>>>>> 1801054 (Add test file)
       />
     </div>
   );

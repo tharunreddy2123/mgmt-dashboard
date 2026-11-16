@@ -524,19 +524,6 @@ async def get_suggestions():
                             "Why is my pod restarting? Give root cause", "Show warning events",
                             "Show namespaces"]}
 
-<<<<<<< HEAD
-@app.get("/api/openshift/token-status")
-async def token_status():
-    """Check if the OpenShift token is valid."""
-    in_cluster = openshift_client.in_cluster
-    probe = await openshift_client._api_request("/apis/project.openshift.io/v1/projects")
-    if "401" in str(probe.get("error", "")):
-        return {"status": "expired", "in_cluster": in_cluster, "message": "Token is expired — update OPENSHIFT_TOKEN in backend/.env and restart"}
-    if "error" in probe:
-        return {"status": "error", "in_cluster": in_cluster, "message": probe["error"]}
-    count = len(probe.get("items", []))
-    return {"status": "valid", "in_cluster": in_cluster, "accessible_projects": count}
-=======
 @app.get("/api/openshift/connection")
 async def cluster_connection():
     """Report whether the backend can reach the cluster with its current credentials (read-only probe)."""
@@ -547,27 +534,11 @@ async def cluster_connection():
     if "error" in probe:
         return {"status": "disconnected", "server": server, "message": probe["error"]}
     return {"status": "connected", "server": server, "version": probe.get("gitVersion", "")}
->>>>>>> 1801054 (Add test file)
 
 class ClusterConnectRequest(BaseModel):
     api_url: str
     token: str
 
-<<<<<<< HEAD
-@app.post("/api/openshift/update-token")
-async def update_token(request: TokenUpdateRequest):
-    """Hot-reload the OpenShift token without restarting the backend."""
-    new_token = request.token.strip()
-    if not new_token.startswith("sha256~"):
-        raise HTTPException(status_code=400, detail="Token must start with sha256~")
-    openshift_client.token = new_token
-    # Verify it works
-    probe = await openshift_client._api_request("/apis/project.openshift.io/v1/projects")
-    if "401" in str(probe.get("error", "")):
-        raise HTTPException(status_code=401, detail="New token is also invalid — check and try again")
-    count = len(probe.get("items", []))
-    return {"status": "ok", "message": f"Token updated. {count} project(s) accessible."}
-=======
 @app.post("/api/openshift/connect")
 async def connect_cluster(request: ClusterConnectRequest):
     """Point the backend at a cluster (API URL + token) without restarting. In-memory only; read-only access."""
@@ -577,18 +548,18 @@ async def connect_cluster(request: ClusterConnectRequest):
         raise HTTPException(status_code=400, detail="Cluster API URL must start with https://")
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
-    previous = (openshift_client.api_url, openshift_client.token, openshift_client.headers["Authorization"])
+    previous = (openshift_client.api_url, openshift_client._token_override)
+    openshift_client._cache.clear()
     openshift_client.api_url = api_url
     openshift_client.token = token
-    openshift_client.headers["Authorization"] = f"Bearer {token}"
     probe = await openshift_client._api_request("/version")
     if "error" in probe:
         # Roll back so a bad attempt doesn't break a working connection
-        openshift_client.api_url, openshift_client.token, openshift_client.headers["Authorization"] = previous
+        openshift_client.api_url, openshift_client._token_override = previous
+        openshift_client._cache.clear()
         code = 401 if "401" in str(probe["error"]) or "403" in str(probe["error"]) else 502
         raise HTTPException(status_code=code, detail=f"Could not connect: {probe['error']}")
     return {"status": "connected", "server": api_url, "version": probe.get("gitVersion", "")}
->>>>>>> 1801054 (Add test file)
 
 @app.get("/api/watsonx/test")
 async def test_watsonx():
