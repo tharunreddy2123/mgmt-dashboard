@@ -13,6 +13,14 @@ from rca import is_rca_question, investigate, investigate_node
 from openshift_client import openshift_client
 from watsonx_client import watsonx_client
 
+try:
+    from rag_system import rag_system
+    RAG_AVAILABLE = True
+except (ImportError, RuntimeError) as e:
+    print(f"Warning: RAG system unavailable ({type(e).__name__}).")
+    RAG_AVAILABLE = False
+    rag_system = None
+
 app = FastAPI(title="OpenShift AI Assistant API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins_list,
                    allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
@@ -299,6 +307,8 @@ async def root():
 @app.get("/health")
 async def health_check():
     wx_healthy  = await watsonx_client.check_health()
+    rag_status  = "healthy" if RAG_AVAILABLE else "unavailable"
+    rag_docs    = rag_system.get_stats()["total_documents"] if RAG_AVAILABLE else 0
     return {
         "api": "healthy",
         "watsonx_ai": "healthy" if wx_healthy else "unavailable",

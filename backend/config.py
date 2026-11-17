@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     watsonx_model: str = "meta-llama/llama-3-3-70b-instruct"
 
 
+    # ChromaDB Configuration
+    chroma_persist_dir: str = "./chroma_db"
+
     # API Configuration
     api_host: str = "0.0.0.0"
     api_port: int = 8000
