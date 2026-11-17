@@ -1,19 +1,25 @@
 import httpx
 from typing import List, Dict, Any, Optional
 from config import settings
+from prompts import RCA_SYSTEM_INSTRUCTION
 
 _SYSTEM_INSTRUCTION = (
-    "You are an OpenShift assistant. Answer questions about the live cluster data provided.\n\n"
-    "Rules:\n"
+    "You are a READ-ONLY OpenShift assistant. Answer questions about the live cluster data provided.\n\n"
+    "CRITICAL — READ-ONLY CONSTRAINT:\n"
+    "- You have NO ability to create, delete, scale, restart, patch, exec into, or modify ANYTHING in the cluster.\n"
+    "- NEVER say 'I have restarted', 'I have deleted', 'I have scaled', or imply you performed a write operation.\n"
+    "- NEVER pretend to execute a mutating command or confirm a change was made.\n"
+    "- When a fix requires a write operation, provide the exact `oc` command the user must run themselves.\n"
+    "- You may only READ: pods, logs, events, nodes, deployments, namespaces, services.\n\n"
+    "Output rules:\n"
     "1. Be SHORT and DIRECT. No long introductions or summaries.\n"
     "2. Only mention what is relevant to the question asked.\n"
     "3. For lists: show only the key facts (name, status, restarts). Skip healthy/normal items unless asked.\n"
-    "4. For problems: one line per issue — pod name, what's wrong, fix command.\n"
-    "5. For actions: one confirmation line of what was done.\n"
-    "6. Never repeat information. Never pad with explanations unless asked.\n"
-    "7. Use bullet points for lists, inline backticks for names and commands.\n"
-    "8. Max 10 bullet points in any response. If more exist, summarise the rest in one line.\n"
-    "9. Default namespace: tharunreddy-dev.\n"
+    "4. For problems: one line per issue — pod name, what's wrong, then the exact fix command for the user to run.\n"
+    "5. Never repeat information. Never pad with explanations unless asked.\n"
+    "6. Use bullet points for lists, inline backticks for names and commands.\n"
+    "7. Max 10 bullet points in any response. If more exist, summarise the rest in one line.\n"
+    "8. Default namespace: tharunreddy-dev.\n"
 )
 
 # IAM token endpoint (same for all regions)
@@ -73,7 +79,8 @@ class WatsonXClient:
     # Core generation
     # ------------------------------------------------------------------
 
-    async def _generate(self, messages: List[Dict[str, str]], temperature: float = 0.4) -> str:
+    async def _generate(self, messages: List[Dict[str, str]], temperature: float = 0.4,
+                        max_tokens: int = 400) -> str:
         """Call the watsonx.ai chat/completions endpoint (proper instruction-following mode)."""
         token = await self._bearer()
         payload = {
@@ -81,7 +88,7 @@ class WatsonXClient:
             "project_id": self.project_id,
             "messages":   messages,
             "parameters": {
-                "max_tokens":  400,
+                "max_tokens":  max_tokens,
                 "temperature": temperature,
             },
         }
@@ -117,9 +124,10 @@ class WatsonXClient:
         self,
         user_message: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
+        system: str = _SYSTEM_INSTRUCTION,
     ) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": _SYSTEM_INSTRUCTION}
+            {"role": "system", "content": system}
         ]
         if conversation_history:
             for msg in conversation_history:
@@ -137,6 +145,7 @@ class WatsonXClient:
         question: str,
         context: Optional[str] = None,
         conversation_history: Optional[List[Dict[str, str]]] = None,
+        rca: bool = False,
     ) -> str:
         if context:
             user_message = (
@@ -145,9 +154,13 @@ class WatsonXClient:
             )
         else:
             user_message = question
-        messages = self._build_messages(user_message, conversation_history)
+        if rca:
+            messages = self._build_messages(user_message, conversation_history, system=RCA_SYSTEM_INSTRUCTION)
+        else:
+            messages = self._build_messages(user_message, conversation_history)
         try:
-            return await self._generate(messages)
+            return await self._generate(messages, temperature=0.1 if rca else 0.4,
+                                        max_tokens=1500 if rca else 400)
         except Exception as e:
             return f"Error communicating with watsonx.ai: {str(e)}"
 

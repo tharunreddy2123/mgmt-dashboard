@@ -1,17 +1,13 @@
-# ── Build the React app ──────────────────────────────────────────────────────
+# ---- build ----
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY package*.json ./
+COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-# No VITE_BACKEND_API_URL: the app calls the same origin and nginx proxies /api to the backend
 RUN npm run build
 
-# ── Serve with nginx (non-root, port 8080 — works with OpenShift's random UID) ─
-FROM nginxinc/nginx-unprivileged:1.27-alpine
-# Rendered by the image entrypoint with envsubst; only BACKEND_URL is substituted
-ENV NGINX_ENVSUBST_FILTER=BACKEND_
-ENV BACKEND_URL=http://ai-dashboard-backend:8000
-COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+# ---- serve (non-root nginx, listens on 8080 — OpenShift compatible) ----
+FROM nginxinc/nginx-unprivileged:stable-alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080

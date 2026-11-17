@@ -7,21 +7,12 @@ import { BACKEND_URL } from '../lib/api-client';
 import {
   Search, Filter, Layers, Container, AlertTriangle, CheckCircle,
   XCircle, Clock, RefreshCw, X, FileText, Terminal, ChevronDown, Copy, Check, ClipboardPaste,
-  ChevronUp, Minus,
+  Minus,
 } from 'lucide-react';
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
 type PanelMode = 'logs' | 'describe';
-
-interface ScaleModal {
-  pod: OCPod;
-  /** inferred controller name to scale (e.g. "nginx", "nginx2") */
-  controllerName: string;
-  /** target replica count */
-  replicas: number;
-  direction: 'up' | 'down';
-}
 
 interface PodPanel {
   podName: string;
@@ -92,32 +83,6 @@ export default function Pods() {
   const [panel, setPanel] = useState<PodPanel | null>(null);
   // textarea value for the "paste logs" input inside the RBAC-denied panel
   const [pasteInput, setPasteInput] = useState('');
-  // scale confirmation modal
-  const [scaleModal, setScaleModal] = useState<ScaleModal | null>(null);
-  const [scaleLoading, setScaleLoading] = useState(false);
-  const [scaleResult, setScaleResult] = useState<{ success: boolean; message: string } | null>(null);
-  // namespaces where the token can actually GET+PATCH deployments
-  const [scalableNamespaces, setScalableNamespaces] = useState<Set<string>>(new Set());
-
-  /** Probe each namespace — can we GET deployments there? */
-  const probeScalableNamespaces = async (allNs: string[]) => {
-    const results = await Promise.all(
-      allNs.map(async ns => {
-        try {
-          const res = await fetch(`${BACKEND_URL}/api/openshift/deployment-replicas?name=__probe__&namespace=${encodeURIComponent(ns)}`);
-          // 404 = no such deployment but we CAN read — that's fine, namespace is scalable
-          // 403 = no permission — not scalable
-          // We treat anything other than 403 as "has read access"
-          if (res.status === 403) return null;
-          return ns;
-        } catch {
-          return null;
-        }
-      })
-    );
-    setScalableNamespaces(new Set(results.filter(Boolean) as string[]));
-  };
-
   const fetchData = async () => {
     setLoading(true);
     setError(null);
@@ -129,8 +94,6 @@ export default function Pods() {
       const nsFromApi  = ns.map(n => n.metadata.name);
       const allNs = [...new Set([...nsFromApi, ...nsFromPods])].sort();
       setNamespaces(allNs);
-      // Fire permission probes in background — don't block the main render
-      probeScalableNamespaces(allNs);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch');
     }
@@ -138,144 +101,6 @@ export default function Pods() {
   };
 
   useEffect(() => { fetchData(); }, []);
-
-  // ── scale helpers ─────────────────────────────────────────────────────────
-
-  /**
-   * Derive the controller name from live owner references returned by the backend.
-   * Returns { name, kind } or null if the pod is truly standalone (no owners at all).
-   * For every recognised controller type the backend oc_scale will handle scaling.
-   */
-  const resolveControllerFromOwners = (
-    owners: Array<{ kind: string; name: string }>
-  ): { name: string; kind: string } | null => {
-    // Direct Deployment
-    const dep = owners.find(o => o.kind === 'Deployment');
-    if (dep) return { name: dep.name, kind: 'Deployment' };
-
-    // ReplicaSet → strip pod-template-hash → Deployment
-    const rs = owners.find(o => o.kind === 'ReplicaSet');
-    if (rs) {
-      const parts = rs.name.split('-');
-      if (parts.length >= 2 && /^[a-z0-9]{5,16}$/.test(parts[parts.length - 1]))
-        return { name: parts.slice(0, -1).join('-'), kind: 'Deployment' };
-      // Non-standard RS — use RS name directly; oc scale will figure it out
-      return { name: rs.name, kind: 'ReplicaSet' };
-    }
-
-    // ReplicationController → strip numeric revision → DeploymentConfig
-    const rc = owners.find(o => o.kind === 'ReplicationController');
-    if (rc) {
-      const m = rc.name.match(/^(.+)-\d+$/);
-      return { name: m ? m[1] : rc.name, kind: 'DeploymentConfig' };
-    }
-
-    // StatefulSet — name is the owner name directly
-    const ss = owners.find(o => o.kind === 'StatefulSet');
-    if (ss) return { name: ss.name, kind: 'StatefulSet' };
-
-    // Any other owner — use its name and let oc scale try
-    if (owners.length > 0) return { name: owners[0].name, kind: owners[0].kind };
-
-    return null; // no owners — truly standalone
-  };
-
-  const openScaleModal = async (pod: OCPod, direction: 'up' | 'down') => {
-    setScaleResult(null);
-
-    const ns = pod.metadata.namespace;
-    if (!scalableNamespaces.has(ns)) {
-      setScaleResult({ success: false, message: `No deployment access in namespace "${ns}" — read-only view` });
-      return;
-    }
-
-    // Fetch live owner references from the backend
-    let controllerName: string | null = null;
-    try {
-      const ownerRes = await fetch(
-        `${BACKEND_URL}/api/openshift/pod-owner?pod_name=${encodeURIComponent(pod.metadata.name)}&namespace=${encodeURIComponent(ns)}`
-      );
-      if (ownerRes.ok) {
-        const ownerData = await ownerRes.json();
-        const owners: Array<{ kind: string; name: string }> = ownerData.ownerReferences || [];
-        const resolved = resolveControllerFromOwners(owners);
-        if (resolved) {
-          controllerName = resolved.name;
-        } else {
-          // Truly standalone pod — no owners at all
-          setScaleResult({
-            success: false,
-            message: `"${pod.metadata.name}" is a standalone pod with no controller. ` +
-              `To scale, delete it and create a Deployment instead.`,
-          });
-          return;
-        }
-      }
-    } catch { /* fall through to name-based guess */ }
-
-    // Fallback: derive name from pod's cached ownerReferences
-    if (!controllerName) {
-      const owners = pod.metadata.ownerReferences || [];
-      const resolved = resolveControllerFromOwners(owners);
-      controllerName = resolved?.name ?? null;
-    }
-
-    // If still no controller — pod has no owners at all, nothing to scale
-    if (!controllerName) {
-      setScaleResult({
-        success: false,
-        message: `"${pod.metadata.name}" is a standalone pod with no controller.`,
-      });
-      return;
-    }
-
-    // Fetch current replica count to show ±1 in the confirmation
-    let currentReplicas = 1;
-    try {
-      const repRes = await fetch(
-        `${BACKEND_URL}/api/openshift/deployment-replicas?name=${encodeURIComponent(controllerName)}&namespace=${encodeURIComponent(ns)}`
-      );
-      if (repRes.ok) {
-        const repData = await repRes.json();
-        currentReplicas = repData.replicas ?? 1;
-      }
-    } catch { /* use default */ }
-
-    const targetReplicas = direction === 'up' ? currentReplicas + 1 : Math.max(0, currentReplicas - 1);
-    setScaleModal({ pod, controllerName, replicas: targetReplicas, direction });
-  };
-
-  const confirmScale = async () => {
-    if (!scaleModal) return;
-    setScaleLoading(true);
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/openshift/scale`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: scaleModal.controllerName,
-          namespace: scaleModal.pod.metadata.namespace,
-          replicas: scaleModal.replicas,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        const detail: string = data.detail || `HTTP ${res.status}`;
-        // 401 = expired token — give an actionable message
-        const msg = res.status === 401 || detail.includes('401')
-          ? '⚠️ OpenShift token expired. Click the "Token" button in the header to paste a fresh token.'
-          : detail;
-        throw new Error(msg);
-      }
-      setScaleResult({ success: true, message: data.message });
-      setScaleModal(null);
-      setTimeout(() => fetchData(), 2000);
-    } catch (err) {
-      setScaleResult({ success: false, message: err instanceof Error ? err.message : 'Scale failed' });
-      setScaleModal(null);
-    }
-    setScaleLoading(false);
-  };
 
   // ── action handlers ──────────────────────────────────────────────────────
 
@@ -348,7 +173,7 @@ export default function Pods() {
     const desired = d.spec?.replicas ?? 0;
     const matchNs = nsFilter === 'all' || d.metadata.namespace === nsFilter;
     const matchSearch = d.metadata.name.toLowerCase().includes(search.toLowerCase());
-    return desired === 0 && matchNs && matchSearch && scalableNamespaces.has(d.metadata.namespace);
+    return desired === 0 && matchNs && matchSearch;
   });
 
   // Build a map: "namespace/controllerName" → replica count for the Replicas column
@@ -578,7 +403,7 @@ export default function Pods() {
             </thead>
             <tbody>
 
-              {/* ── zero-replica deployments (scaled down, no pods) ── */}
+              {/* zero-replica deployments (scaled down, no pods) */}
               {zeroRepDeps.map(dep => (
                 <tr
                   key={`zero-${dep.metadata.uid}`}
@@ -626,32 +451,8 @@ export default function Pods() {
                   <td className="px-4 py-3">
                     <span className="text-xs font-medium text-yellow-400">scaled-down</span>
                   </td>
-                  {/* Actions — Scale Up only */}
-                  <td className="px-4 py-3">
-                    <button
-                      onClick={() => {
-                        const fakePod = {
-                          metadata: {
-                            name: dep.metadata.name,
-                            namespace: dep.metadata.namespace,
-                            uid: dep.metadata.uid,
-                            creationTimestamp: dep.metadata.creationTimestamp,
-                            ownerReferences: [{ kind: 'Deployment', name: dep.metadata.name, uid: dep.metadata.uid }],
-                          },
-                          spec: { containers: [] },
-                          status: { phase: 'Unknown', containerStatuses: [] },
-                        } as OCPod;
-                        openScaleModal(fakePod, 'up');
-                      }}
-                      title="Scale up (+1 replica)"
-                      className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                        isDark ? 'bg-blue-500/10 text-blue-400 hover:bg-blue-500/20' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
-                      }`}
-                    >
-                      <ChevronUp size={11} />
-                      Scale Up
-                    </button>
-                  </td>
+                  {/* Actions (read-only view) */}
+                  <td className="px-4 py-3"><span className={`text-xs ${isDark ? 'text-gray-600' : 'text-gray-300'}`}>-</span></td>
                 </tr>
               ))}
 
@@ -743,49 +544,6 @@ export default function Pods() {
                             <Terminal size={11} />
                             Logs
                           </button>
-
-                          {/* Scale Up / Scale Down — disabled for standalone pods */}
-                          {(() => {
-                            const nsScalable = scalableNamespaces.has(pod.metadata.namespace);
-                            const hasController = (pod.metadata.ownerReferences ?? []).length > 0;
-                            const canScale = nsScalable && hasController;
-                            const disabledTitle = !nsScalable
-                              ? `No deployment access in namespace "${pod.metadata.namespace}"`
-                              : 'Standalone pod — no controller to scale';
-                            const disabledCls = isDark
-                              ? 'bg-white/[0.03] text-gray-600 cursor-not-allowed'
-                              : 'bg-gray-100 text-gray-400 cursor-not-allowed';
-                            return (
-                              <>
-                                <button
-                                  onClick={() => canScale && openScaleModal(pod, 'up')}
-                                  disabled={!canScale}
-                                  title={canScale ? 'Scale up (+1 replica)' : disabledTitle}
-                                  className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                                    canScale
-                                      ? isDark ? 'bg-blue-500/10 text-blue-400 hover:bg-blue-500/20' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
-                                      : disabledCls
-                                  }`}
-                                >
-                                  <ChevronUp size={11} />
-                                  Scale Up
-                                </button>
-                                <button
-                                  onClick={() => canScale && openScaleModal(pod, 'down')}
-                                  disabled={!canScale}
-                                  title={canScale ? 'Scale down (-1 replica)' : disabledTitle}
-                                  className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                                    canScale
-                                      ? isDark ? 'bg-orange-500/10 text-orange-400 hover:bg-orange-500/20' : 'bg-orange-50 text-orange-600 hover:bg-orange-100'
-                                      : disabledCls
-                                  }`}
-                                >
-                                  <Minus size={11} />
-                                  Scale Down
-                                </button>
-                              </>
-                            );
-                          })()}
                         </div>
                       </td>
                     </motion.tr>
@@ -1042,124 +800,6 @@ export default function Pods() {
           </table>
         </div>
       </div>
-
-      {/* ── Scale result toast ── */}
-      <AnimatePresence>
-        {scaleResult && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
-            transition={{ duration: 0.2 }}
-            className="fixed bottom-6 right-6 z-50 max-w-sm"
-          >
-            <div className={`flex items-start gap-3 px-4 py-3 rounded-xl border shadow-xl text-sm ${
-              scaleResult.success
-                ? (isDark ? 'bg-[#0d1220] border-emerald-500/30 text-emerald-400' : 'bg-white border-emerald-300 text-emerald-700')
-                : (isDark ? 'bg-[#0d1220] border-red-500/30 text-red-400' : 'bg-white border-red-300 text-red-600')
-            }`}>
-              {scaleResult.success
-                ? <CheckCircle size={16} className="mt-0.5 flex-shrink-0" />
-                : <XCircle size={16} className="mt-0.5 flex-shrink-0" />
-              }
-              <span className="flex-1">{scaleResult.message}</span>
-              <button onClick={() => setScaleResult(null)} className="text-gray-400 hover:text-white ml-1">
-                <X size={14} />
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* ── Scale confirmation modal ── */}
-      <AnimatePresence>
-        {scaleModal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className={`w-full max-w-md rounded-2xl border shadow-2xl ${isDark ? 'bg-[#0d1220] border-white/[0.08]' : 'bg-white border-gray-200'}`}
-            >
-              {/* modal header */}
-              <div className={`flex items-center justify-between px-5 py-4 border-b ${isDark ? 'border-white/[0.06]' : 'border-gray-100'}`}>
-                <div className="flex items-center gap-2">
-                  {scaleModal.direction === 'up'
-                    ? <ChevronUp size={18} className="text-blue-400" />
-                    : <Minus size={18} className="text-orange-400" />
-                  }
-                  <h3 className={`font-semibold text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    Confirm Scale {scaleModal.direction === 'up' ? 'Up' : 'Down'}
-                  </h3>
-                </div>
-                <button onClick={() => setScaleModal(null)} className={`${isDark ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}>
-                  <X size={16} />
-                </button>
-              </div>
-
-              {/* modal body */}
-              <div className="px-5 py-4 space-y-3 text-sm">
-                {/* command preview */}
-                <p className={`text-xs font-medium ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Command that will run:</p>
-                <div className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border font-mono text-xs overflow-x-auto ${isDark ? 'bg-black/40 border-white/[0.08] text-emerald-300' : 'bg-gray-950 border-gray-700 text-emerald-400'}`}>
-                  <Terminal size={12} className="flex-shrink-0 text-emerald-500" />
-                  <span>
-                    oc scale deployment {scaleModal.controllerName} --replicas={scaleModal.replicas} -n {scaleModal.pod.metadata.namespace}
-                  </span>
-                  <CopyBtn text={`oc scale deployment ${scaleModal.controllerName} --replicas=${scaleModal.replicas} -n ${scaleModal.pod.metadata.namespace}`} />
-                </div>
-                <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                  The backend auto-detects the resource type (Deployment / DeploymentConfig / ReplicationController).
-                </p>
-                {scaleModal.direction === 'down' && (
-                  <div className={`flex items-start gap-2 text-xs px-3 py-2 rounded-lg ${isDark ? 'bg-orange-400/10 text-orange-400 border border-orange-400/20' : 'bg-orange-50 text-orange-600 border border-orange-200'}`}>
-                    <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />
-                    Scaling down will terminate one running pod. Minimum 0 replicas.
-                  </div>
-                )}
-              </div>
-
-              {/* modal footer */}
-              <div className={`flex items-center justify-end gap-2 px-5 py-4 border-t ${isDark ? 'border-white/[0.06]' : 'border-gray-100'}`}>
-                <button
-                  onClick={() => setScaleModal(null)}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${isDark ? 'bg-white/[0.06] text-gray-300 hover:bg-white/10' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={confirmScale}
-                  disabled={scaleLoading}
-                  className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${
-                    scaleModal.direction === 'up'
-                      ? 'bg-blue-500 hover:bg-blue-600 text-white'
-                      : 'bg-orange-500 hover:bg-orange-600 text-white'
-                  }`}
-                >
-                  {scaleLoading
-                    ? <RefreshCw size={13} className="animate-spin" />
-                    : scaleModal.direction === 'up'
-                      ? <ChevronUp size={13} />
-                      : <Minus size={13} />
-                  }
-                  {scaleLoading
-                    ? 'Scaling…'
-                    : scaleModal.direction === 'up'
-                      ? `Scale Up → ${scaleModal.replicas} replica${scaleModal.replicas !== 1 ? 's' : ''}`
-                      : `Scale Down → ${scaleModal.replicas} replica${scaleModal.replicas !== 1 ? 's' : ''}`
-                  }
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
     </div>
   );

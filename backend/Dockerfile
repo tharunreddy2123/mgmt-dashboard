@@ -1,19 +1,20 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp
 
-# Install system dependencies (needed by some sentence-transformers wheels)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# ChromaDB persistence directory
-RUN mkdir -p ./chroma_db
+# OpenShift runs containers with an arbitrary non-root UID in group 0
+RUN chgrp -R 0 /app && chmod -R g=u /app
+
+USER 1001
 
 EXPOSE 8000
 

@@ -1,15 +1,13 @@
 // API Client with environment-aware configuration and retry logic
 
 const getBackendUrl = (): string => {
-  // Explicit override (set in .env.local for dev, or Netlify env vars for prod)
+  // Explicit override (e.g. VITE_BACKEND_API_URL in .env for local dev)
   const envUrl = import.meta.env.VITE_BACKEND_API_URL;
   if (envUrl) {
     return envUrl.replace(/\/$/, "");
   }
 
-  // Production default: same origin. The web server (nginx on OpenShift, see
-  // nginx.conf.template) forwards /api and /health to the backend service.
-  // Netlify sets VITE_BACKEND_API_URL=/.netlify/functions/api in netlify.toml.
+  // Production on OpenShift: same-origin, nginx proxies /api and /health to the backend service
   if (import.meta.env.PROD) {
     return '';
   }

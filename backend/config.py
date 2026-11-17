@@ -5,7 +5,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
     # OpenShift Configuration
-    # Leave both empty when deployed inside OpenShift: the pod's service account is used automatically.
     openshift_api_url: str = ""
     openshift_token: str = ""
     # Comma-separated namespaces to show when the service account can't list projects

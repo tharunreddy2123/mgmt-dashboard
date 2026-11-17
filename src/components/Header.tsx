@@ -1,96 +1,114 @@
 import { useTheme } from '../context/ThemeContext';
-import { Bell, RefreshCw, Activity, Clock, KeyRound, AlertTriangle, CheckCircle, X, Eye, EyeOff } from 'lucide-react';
+import { Bell, RefreshCw, Activity, Clock, Plug, AlertTriangle, CheckCircle, X, Eye, EyeOff } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 import { BACKEND_URL } from '../lib/api-client';
+
+type ConnStatus = 'connected' | 'unauthorized' | 'disconnected' | 'unknown';
+
+const fmtTime = (d: Date, timeZone: string) =>
+  d.toLocaleTimeString('en-US', { timeZone, hour12: true });
 
 export default function Header() {
   const { isDark } = useTheme();
   const [time, setTime] = useState(new Date());
   const [refreshing, setRefreshing] = useState(false);
 
-  // Token status
-  const [tokenExpired, setTokenExpired] = useState(false);
-  const [inCluster, setInCluster] = useState(false);
-  const [showTokenModal, setShowTokenModal] = useState(false);
+  // Cluster connection
+  const [conn, setConn] = useState<ConnStatus>('unknown');
+  const [server, setServer] = useState('');
+  const [showModal, setShowModal] = useState(false);
+  const [urlInput, setUrlInput] = useState('');
   const [tokenInput, setTokenInput] = useState('');
   const [tokenVisible, setTokenVisible] = useState(false);
-  const [tokenSaving, setTokenSaving] = useState(false);
-  const [tokenMsg, setTokenMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     const interval = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // Check token status on mount and every 5 minutes
-  const checkToken = useCallback(async () => {
+  // Check connection on mount and every 5 minutes
+  const checkConnection = useCallback(async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/api/openshift/token-status`);
+      const res = await fetch(`${BACKEND_URL}/api/openshift/connection`);
       if (!res.ok) return;
       const data = await res.json();
-      setTokenExpired(data.status === 'expired');
-      setInCluster(Boolean(data.in_cluster));
+      setConn(data.status as ConnStatus);
+      setServer(data.server || '');
     } catch { /* backend not reachable — ignore */ }
   }, []);
 
   useEffect(() => {
-    checkToken();
-    const id = setInterval(checkToken, 5 * 60 * 1000);
+    checkConnection();
+    const id = setInterval(checkConnection, 5 * 60 * 1000);
     return () => clearInterval(id);
-  }, [checkToken]);
+  }, [checkConnection]);
 
   const handleRefresh = () => {
     setRefreshing(true);
+    checkConnection();
     setTimeout(() => setRefreshing(false), 1500);
   };
 
-  const openTokenModal = () => {
+  const openModal = () => {
+    setUrlInput(server);
     setTokenInput('');
-    setTokenMsg(null);
+    setMsg(null);
     setTokenVisible(false);
-    setShowTokenModal(true);
+    setShowModal(true);
   };
 
-  const saveToken = async () => {
-    const t = tokenInput.trim();
-    setTokenSaving(true);
-    setTokenMsg(null);
+  const connect = async () => {
+    setConnecting(true);
+    setMsg(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/openshift/update-token`, {
+      const res = await fetch(`${BACKEND_URL}/api/openshift/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: t }),
+        body: JSON.stringify({ api_url: urlInput.trim(), token: tokenInput.trim() }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setTokenMsg({ ok: false, text: data.detail || `HTTP ${res.status}` });
+        setMsg({ ok: false, text: data.detail || `HTTP ${res.status}` });
       } else {
-        setTokenMsg({ ok: true, text: data.message || 'Token updated successfully!' });
-        setTokenExpired(false);
-        // Close modal after short delay
-        setTimeout(() => { setShowTokenModal(false); setTokenInput(''); }, 1500);
+        setConn('connected');
+        setServer(data.server || urlInput.trim());
+        setMsg({ ok: true, text: `Connected to ${data.server}${data.version ? ` (${data.version})` : ''}` });
+        setTimeout(() => { setShowModal(false); setTokenInput(''); }, 1500);
       }
     } catch (e) {
-      setTokenMsg({ ok: false, text: e instanceof Error ? e.message : 'Request failed' });
+      setMsg({ ok: false, text: e instanceof Error ? e.message : 'Request failed' });
     }
-    setTokenSaving(false);
+    setConnecting(false);
   };
+
+  const bad = conn === 'unauthorized' || conn === 'disconnected';
+  const statusLabel =
+    conn === 'connected' ? 'Connected to cluster'
+    : conn === 'unauthorized' ? 'Token rejected'
+    : conn === 'disconnected' ? 'Cluster unreachable'
+    : 'Checking cluster…';
 
   return (
     <>
-      {/* ── Token-expired banner ─────────────────────────────────────────── */}
-      {tokenExpired && (
+      {/* ── Connection banner ────────────────────────────────────────────── */}
+      {bad && (
         <div className="sticky top-0 z-40 flex items-center justify-between gap-3 px-5 py-2 bg-red-500/95 backdrop-blur text-white text-xs font-medium">
           <div className="flex items-center gap-2">
             <AlertTriangle size={13} className="flex-shrink-0" />
-            <span>OpenShift token expired — scaling and live data will fail until you refresh it.</span>
+            <span>
+              {conn === 'unauthorized'
+                ? 'The cluster rejected the current credentials — live data is unavailable.'
+                : 'Cannot reach the cluster — live data is unavailable.'}
+            </span>
           </div>
           <button
-            onClick={openTokenModal}
+            onClick={openModal}
             className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-md bg-white/20 hover:bg-white/30 transition-colors font-semibold"
           >
-            <KeyRound size={12} />
-            Refresh Token
+            <Plug size={12} />
+            Connect to cluster
           </button>
         </div>
       )}
@@ -105,34 +123,35 @@ export default function Header() {
       >
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full animate-pulse ${tokenExpired ? 'bg-red-400' : 'bg-emerald-400'}`} />
-            <span className={`text-xs font-medium ${tokenExpired ? (isDark ? 'text-red-400' : 'text-red-500') : (isDark ? 'text-emerald-400' : 'text-emerald-600')}`}>
-              {tokenExpired ? 'Token Expired' : 'All Systems Operational'}
+            <div className={`w-2 h-2 rounded-full animate-pulse ${bad ? 'bg-red-400' : conn === 'connected' ? 'bg-emerald-400' : 'bg-gray-400'}`} />
+            <span className={`text-xs font-medium ${bad ? (isDark ? 'text-red-400' : 'text-red-500') : conn === 'connected' ? (isDark ? 'text-emerald-400' : 'text-emerald-600') : (isDark ? 'text-gray-400' : 'text-gray-500')}`}>
+              {statusLabel}
             </span>
           </div>
           <div className={`h-4 w-px ${isDark ? 'bg-white/10' : 'bg-gray-300'}`} />
-          <div className={`flex items-center gap-1.5 text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+          <div className={`flex items-center gap-3 text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
             <Clock size={13} />
-            <span>{time.toLocaleTimeString()}</span>
+            <span>IST {fmtTime(time, 'Asia/Kolkata')}</span>
+            <span className={isDark ? 'text-white/20' : 'text-gray-300'}>|</span>
+            <span>EST {fmtTime(time, 'America/New_York')}</span>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Token refresh button (hidden when the backend authenticates via the pod's service account) */}
-          {!inCluster && <button
-            onClick={openTokenModal}
-            title="Update OpenShift token"
+          <button
+            onClick={openModal}
+            title={server ? `Cluster: ${server}` : 'Connect to a cluster'}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              tokenExpired
+              bad
                 ? 'bg-red-500 text-white hover:bg-red-600'
                 : isDark
                   ? 'bg-white/[0.06] text-gray-400 hover:bg-white/10 hover:text-white'
                   : 'bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700'
             }`}
           >
-            <KeyRound size={13} />
-            {tokenExpired ? 'Refresh Token' : 'Token'}
-          </button>}
+            <Plug size={13} />
+            Connect to cluster
+          </button>
 
           <button
             onClick={handleRefresh}
@@ -163,73 +182,84 @@ export default function Header() {
         </div>
       </header>
 
-      {/* ── Token update modal ───────────────────────────────────────────── */}
-      {showTokenModal && (
+      {/* ── Connect-to-cluster modal ─────────────────────────────────────── */}
+      {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className={`w-full max-w-lg rounded-2xl border shadow-2xl ${isDark ? 'bg-[#0d1220] border-white/[0.08]' : 'bg-white border-gray-200'}`}>
-            {/* header */}
             <div className={`flex items-center justify-between px-5 py-4 border-b ${isDark ? 'border-white/[0.06]' : 'border-gray-100'}`}>
               <div className="flex items-center gap-2">
-                <KeyRound size={16} className="text-blue-400" />
-                <h3 className={`font-semibold text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>Refresh OpenShift Token</h3>
+                <Plug size={16} className="text-blue-400" />
+                <h3 className={`font-semibold text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>Connect to cluster</h3>
               </div>
-              <button onClick={() => setShowTokenModal(false)} className={isDark ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}>
+              <button onClick={() => setShowModal(false)} className={isDark ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}>
                 <X size={16} />
               </button>
             </div>
 
-            {/* body */}
             <div className="px-5 py-4 space-y-4 text-sm">
-              <ol className={`space-y-1.5 text-xs leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                <li>1. Go to your <a href="https://console.apps.rm3.7wse.p1.openshiftapps.com" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">OpenShift Console</a></li>
-                <li>2. Click your username (top-right) → <strong className={isDark ? 'text-gray-200' : 'text-gray-700'}>Copy login command</strong> → <strong className={isDark ? 'text-gray-200' : 'text-gray-700'}>Display Token</strong></li>
-                <li>3. Copy the token and paste it below</li>
-              </ol>
+              <p className={`text-xs leading-relaxed ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                Enter the cluster API URL and a token (OpenShift console → username → <strong>Copy login command</strong> → <strong>Display Token</strong>).
+                Access is read-only. Credentials are kept in backend memory only and are not saved.
+              </p>
 
-              <div className={`relative flex items-center rounded-lg border ${isDark ? 'bg-white/[0.04] border-white/[0.08]' : 'bg-gray-50 border-gray-200'}`}>
+              <div className="space-y-1.5">
+                <label className={`text-xs font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Cluster API URL</label>
                 <input
-                  type={tokenVisible ? 'text' : 'password'}
-                  value={tokenInput}
-                  onChange={e => setTokenInput(e.target.value)}
-                  placeholder="Paste your token here..."
+                  type="text"
+                  value={urlInput}
+                  onChange={e => setUrlInput(e.target.value)}
+                  placeholder="https://api.<cluster-domain>:6443"
                   autoComplete="off"
-                  className={`flex-1 bg-transparent px-3 py-2.5 text-xs font-mono outline-none ${isDark ? 'text-white placeholder-gray-600' : 'text-gray-900 placeholder-gray-400'}`}
+                  className={`w-full rounded-lg border px-3 py-2.5 text-xs font-mono outline-none ${isDark ? 'bg-white/[0.04] border-white/[0.08] text-white placeholder-gray-600' : 'bg-gray-50 border-gray-200 text-gray-900 placeholder-gray-400'}`}
                 />
-                <button
-                  onClick={() => setTokenVisible(v => !v)}
-                  className={`px-3 py-2.5 ${isDark ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}
-                >
-                  {tokenVisible ? <EyeOff size={14} /> : <Eye size={14} />}
-                </button>
               </div>
 
-              {tokenMsg && (
+              <div className="space-y-1.5">
+                <label className={`text-xs font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Token</label>
+                <div className={`flex items-center rounded-lg border ${isDark ? 'bg-white/[0.04] border-white/[0.08]' : 'bg-gray-50 border-gray-200'}`}>
+                  <input
+                    type={tokenVisible ? 'text' : 'password'}
+                    value={tokenInput}
+                    onChange={e => setTokenInput(e.target.value)}
+                    placeholder="sha256~..."
+                    autoComplete="off"
+                    className={`flex-1 bg-transparent px-3 py-2.5 text-xs font-mono outline-none ${isDark ? 'text-white placeholder-gray-600' : 'text-gray-900 placeholder-gray-400'}`}
+                  />
+                  <button
+                    onClick={() => setTokenVisible(v => !v)}
+                    className={`px-3 py-2.5 ${isDark ? 'text-gray-500 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    {tokenVisible ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+              </div>
+
+              {msg && (
                 <div className={`flex items-start gap-2 text-xs px-3 py-2 rounded-lg border ${
-                  tokenMsg.ok
+                  msg.ok
                     ? isDark ? 'bg-emerald-400/10 text-emerald-400 border-emerald-400/20' : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                     : isDark ? 'bg-red-400/10 text-red-400 border-red-400/20' : 'bg-red-50 text-red-600 border-red-200'
                 }`}>
-                  {tokenMsg.ok ? <CheckCircle size={12} className="mt-0.5 flex-shrink-0" /> : <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />}
-                  {tokenMsg.text}
+                  {msg.ok ? <CheckCircle size={12} className="mt-0.5 flex-shrink-0" /> : <AlertTriangle size={12} className="mt-0.5 flex-shrink-0" />}
+                  {msg.text}
                 </div>
               )}
             </div>
 
-            {/* footer */}
             <div className={`flex items-center justify-end gap-2 px-5 py-4 border-t ${isDark ? 'border-white/[0.06]' : 'border-gray-100'}`}>
               <button
-                onClick={() => setShowTokenModal(false)}
+                onClick={() => setShowModal(false)}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${isDark ? 'bg-white/[0.06] text-gray-300 hover:bg-white/10' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
               >
                 Cancel
               </button>
               <button
-                onClick={saveToken}
-                disabled={tokenSaving || !tokenInput.trim()}
+                onClick={connect}
+                disabled={connecting || !urlInput.trim() || !tokenInput.trim()}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-blue-500 hover:bg-blue-600 text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {tokenSaving ? <RefreshCw size={13} className="animate-spin" /> : <KeyRound size={13} />}
-                {tokenSaving ? 'Applying…' : 'Apply Token'}
+                {connecting ? <RefreshCw size={13} className="animate-spin" /> : <Plug size={13} />}
+                {connecting ? 'Connecting…' : 'Connect'}
               </button>
             </div>
           </div>

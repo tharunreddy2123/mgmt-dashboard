@@ -1,0 +1,166 @@
+# Applied with: oc apply -n <namespace> -f openshift/app.yaml
+# Secret `ai-dashboard-secrets` is created separately (see README / GitHub Actions workflow).
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: ai-dashboard-backend
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: ai-dashboard-frontend
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: ai-dashboard-backend
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy: {}
+  output:
+    to:
+      kind: ImageStreamTag
+      name: ai-dashboard-backend:latest
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: ai-dashboard-frontend
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy: {}
+  output:
+    to:
+      kind: ImageStreamTag
+      name: ai-dashboard-frontend:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-dashboard-backend
+  annotations:
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"ai-dashboard-backend:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"backend\")].image"}]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-dashboard-backend
+  template:
+    metadata:
+      labels:
+        app: ai-dashboard-backend
+    spec:
+      containers:
+        - name: backend
+          image: ai-dashboard-backend:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: ai-dashboard-secrets
+          env:
+            - name: ENVIRONMENT
+              value: production
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-dashboard-backend
+spec:
+  selector:
+    app: ai-dashboard-backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-dashboard-frontend
+  annotations:
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"ai-dashboard-frontend:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"frontend\")].image"}]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-dashboard-frontend
+  template:
+    metadata:
+      labels:
+        app: ai-dashboard-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ai-dashboard-frontend:latest
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-dashboard-frontend
+spec:
+  selector:
+    app: ai-dashboard-frontend
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ai-dashboard
+  annotations:
+    haproxy.router.openshift.io/timeout: 180s
+spec:
+  to:
+    kind: Service
+    name: ai-dashboard-frontend
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

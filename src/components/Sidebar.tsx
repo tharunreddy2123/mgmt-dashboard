@@ -6,7 +6,6 @@ import {
   Container,
   Rocket,
   Server,
-  Zap,
   FileText,
   Bot,
   Bell,
@@ -27,12 +26,15 @@ const navItems = [
   { to: '/pods', icon: Container, label: 'Pods' },
   { to: '/deployments', icon: Rocket, label: 'Deployments' },
   { to: '/nodes', icon: Server, label: 'Nodes' },
-  { to: '/actions', icon: Zap, label: 'Actions' },
   { to: '/logs', icon: FileText, label: 'Logs' },
   { to: '/alerts', icon: Bell, label: 'Alerts' },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  onOpenChat: () => void;
+}
+
+export default function Sidebar({ onOpenChat }: SidebarProps) {
   const { isDark, toggle } = useTheme();
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -51,7 +53,7 @@ export default function Sidebar() {
         {!collapsed && (
           <div className="overflow-hidden">
             <h1 className={`text-sm font-bold tracking-tight ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              IBM
+              IBM AI Ops
             </h1>
             <p className={`text-[10px] ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>Intelligent Operations</p>
           </div>
@@ -123,6 +125,24 @@ export default function Sidebar() {
             {!collapsed && <span>{label}</span>}
           </NavLink>
         ))}
+
+        {/* AI Assistant */}
+        <button
+          onClick={onOpenChat}
+          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all duration-200 ${
+            isDark
+              ? 'text-blue-400 hover:bg-blue-500/10'
+              : 'text-blue-600 hover:bg-blue-50'
+          } ${collapsed ? 'justify-center' : ''}`}
+        >
+          <Sparkles size={18} className="flex-shrink-0" />
+          {!collapsed && (
+            <span className="flex items-center gap-2">
+              AI Assistant
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+            </span>
+          )}
+        </button>
       </nav>
 
       {/* Bottom */}
